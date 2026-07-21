@@ -35,6 +35,17 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="com.google.android.apps.aicore.service.BIND_SERVICE" />
 
+    <!-- Make text-to-speech engines visible so TextToSpeech can bind to them (Android 11+).
+         The explicit package entries are needed on Samsung devices, whose framework otherwise
+         rejects the bind with "not allowed to bind to private engine". -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+        <package android:name="com.samsung.SMT" />
+        <package android:name="com.google.android.tts" />
+    </queries>
+
     <!-- Additional permission required for push notification handling -->
     <!-- Required for resurfacing notifications after boot -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />

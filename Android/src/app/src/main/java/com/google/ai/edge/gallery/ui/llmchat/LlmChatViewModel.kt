@@ -22,6 +22,7 @@ import android.util.Log
 import androidx.datastore.core.DataStore
 import androidx.lifecycle.viewModelScope
 import com.google.ai.edge.gallery.common.SystemPromptHelper
+import com.google.ai.edge.gallery.common.TtsHelper
 import com.google.ai.edge.gallery.data.ConfigKeys
 import com.google.ai.edge.gallery.data.Model
 import com.google.ai.edge.gallery.data.SystemPromptRepository
@@ -58,9 +59,33 @@ open class LlmChatViewModelBase(
   private val systemPromptRepository: SystemPromptRepository? = null,
   userDataDataStore: DataStore<UserData>? = null,
   private val modelFeedbackRepository: Any? = null,
+  private val ttsHelper: TtsHelper? = null,
 ) : ChatViewModel(userDataDataStore) {
   private val _uiSystemPrompt = MutableStateFlow("")
   val uiSystemPrompt = _uiSystemPrompt.asStateFlow()
+
+  private val _speakReplies = MutableStateFlow(false)
+  /** Whether model replies are spoken aloud with the device's text-to-speech engine. */
+  val speakReplies = _speakReplies.asStateFlow()
+
+  fun setSpeakReplies(enabled: Boolean) {
+    _speakReplies.value = enabled
+    if (!enabled) {
+      ttsHelper?.stop()
+    }
+  }
+
+  override fun onAudioRecorderVisibilityChanged(visible: Boolean) {
+    // Silence spoken replies while the recorder is open so the microphone doesn't pick them up.
+    if (visible) {
+      ttsHelper?.stop()
+    }
+  }
+
+  override fun onCleared() {
+    ttsHelper?.stop()
+    super.onCleared()
+  }
 
   /**
    * Sets the system prompt in the UI.
@@ -133,6 +158,9 @@ open class LlmChatViewModelBase(
     viewModelScope.launch(Dispatchers.Default) {
       setInProgress(true)
       setPreparing(true)
+
+      // Cut off any speech still playing from the previous reply and un-mute for this one.
+      ttsHelper?.begin()
 
       // Loading.
       addMessage(model = model, message = ChatMessageLoading(accelerator = accelerator))
@@ -237,6 +265,9 @@ open class LlmChatViewModelBase(
                     latencyMs = latencyMs.toFloat(),
                   )
                 }
+                if (partialResult.isNotEmpty() && _speakReplies.value) {
+                  ttsHelper?.feed(partialResult)
+                }
               }
 
               if (firstRun) {
@@ -264,6 +295,9 @@ open class LlmChatViewModelBase(
                     )
                   }
                 }
+                if (_speakReplies.value) {
+                  ttsHelper?.finish()
+                }
                 setInProgress(false)
                 onDone()
               }
@@ -277,6 +311,7 @@ open class LlmChatViewModelBase(
 
         val errorListener: (String) -> Unit = { message ->
           Log.e(TAG, "Error occurred while running inference")
+          ttsHelper?.stop()
           setInProgress(false)
           setPreparing(false)
           onError(message)
@@ -300,6 +335,7 @@ open class LlmChatViewModelBase(
         )
       } catch (e: Exception) {
         Log.e(TAG, "Error occurred while running inference", e)
+        ttsHelper?.stop()
         setInProgress(false)
         setPreparing(false)
         onError(e.message ?: "")
@@ -309,6 +345,7 @@ open class LlmChatViewModelBase(
 
   fun stopResponse(model: Model) {
     Log.d(TAG, "Stopping response for model ${model.name}...")
+    ttsHelper?.stop()
     if (getLastMessage(model = model) is ChatMessageLoading) {
       removeLastMessage(model = model)
     }
@@ -454,4 +491,5 @@ class LlmAskAudioViewModel
 constructor(
   systemPromptRepository: SystemPromptRepository,
   userDataDataStore: DataStore<UserData>,
-  ) : LlmChatViewModelBase(systemPromptRepository, userDataDataStore, null)
+  ttsHelper: TtsHelper,
+) : LlmChatViewModelBase(systemPromptRepository, userDataDataStore, null, ttsHelper)

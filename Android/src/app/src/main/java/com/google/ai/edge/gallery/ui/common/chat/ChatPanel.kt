@@ -689,6 +689,7 @@ fun ChatPanel(
         },
         onStopButtonClicked = onStopButtonClicked,
         onSetAudioRecorderVisible = { start ->
+          viewModel.onAudioRecorderVisibilityChanged(start)
           showAudioRecorder = start
           if (!showAudioRecorder) {
             curAmplitude = 0

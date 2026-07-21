@@ -70,6 +70,9 @@ data class ChatUiState(
 abstract class ChatViewModel(val userDataDataStore: DataStore<UserData>? = null) : ViewModel() {
   var currentSessionId: String = UUID.randomUUID().toString()
 
+  /** Called when the audio recorder panel is shown or hidden. */
+  open fun onAudioRecorderVisibilityChanged(visible: Boolean) {}
+
   private val _uiState = MutableStateFlow(createUiState())
   val uiState = _uiState.asStateFlow()
 

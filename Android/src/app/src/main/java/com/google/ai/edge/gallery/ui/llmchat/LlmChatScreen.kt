@@ -25,9 +25,17 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.VolumeOff
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -168,10 +176,29 @@ fun LlmAskAudioScreen(
   curSystemPrompt: String = "",
   onSystemPromptChanged: (String) -> Unit = {},
 ) {
+  val speakReplies by viewModel.speakReplies.collectAsState()
+
   ChatViewWrapper(
     viewModel = viewModel,
     modelManagerViewModel = modelManagerViewModel,
     taskId = BuiltInTaskId.LLM_ASK_AUDIO,
+    topBarExtraActions = {
+      IconButton(onClick = { viewModel.setSpeakReplies(!speakReplies) }) {
+        Icon(
+          imageVector =
+            if (speakReplies) Icons.AutoMirrored.Rounded.VolumeUp
+            else Icons.AutoMirrored.Rounded.VolumeOff,
+          contentDescription =
+            stringResource(
+              if (speakReplies) R.string.cd_speak_replies_on else R.string.cd_speak_replies_off
+            ),
+          tint =
+            if (speakReplies) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.onSurface,
+          modifier = Modifier.size(20.dp),
+        )
+      }
+    },
     navigateUp = navigateUp,
     modifier = modifier,
     allowEditingSystemPrompt = allowEditingSystemPrompt,
@@ -225,6 +252,7 @@ fun ChatViewWrapper(
   skillCount: Int = 0,
   mcpCount: Int = 0,
   mcpToolsCount: Int = 0,
+  topBarExtraActions: @Composable () -> Unit = {},
 ) {
   val context = LocalContext.current
   val task = modelManagerViewModel.getTaskById(id = taskId)!!
@@ -350,6 +378,7 @@ fun ChatViewWrapper(
     onSystemPromptChanged = onSystemPromptChanged,
     sendMessageTrigger = sendMessageTrigger,
     showAudioPicker = showAudioPicker,
+    topBarExtraActions = topBarExtraActions,
   )
 }
 

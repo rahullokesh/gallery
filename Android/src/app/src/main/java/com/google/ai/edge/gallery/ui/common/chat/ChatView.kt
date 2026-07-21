@@ -144,6 +144,7 @@ fun ChatView(
   curSystemPrompt: String = "",
   onSystemPromptChanged: (String) -> Unit = {},
   sendMessageTrigger: SendMessageTrigger? = null,
+  topBarExtraActions: @Composable () -> Unit = {},
 ) {
   val uiState by viewModel.uiState.collectAsState()
   val modelManagerUiState by modelManagerViewModel.uiState.collectAsState()
@@ -356,6 +357,7 @@ fun ChatView(
                 )
                 scope.launch { drawerState.open() }
               },
+              extraActions = topBarExtraActions,
             )
           },
         ) { innerPadding ->
