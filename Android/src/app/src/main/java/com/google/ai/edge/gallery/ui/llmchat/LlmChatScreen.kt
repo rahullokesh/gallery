@@ -91,6 +91,7 @@ fun LlmChatScreen(
   skillCount: Int = 0,
   mcpCount: Int = 0,
   mcpToolsCount: Int = 0,
+  topBarExtraActions: @Composable () -> Unit = {},
 ) {
   ChatViewWrapper(
     viewModel = viewModel,
@@ -115,6 +116,7 @@ fun LlmChatScreen(
     showImagePicker = showImagePicker,
     showAudioPicker = showAudioPicker,
     getActiveSkills = getActiveSkills,
+    topBarExtraActions = topBarExtraActions,
   )
 }
 

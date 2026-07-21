@@ -68,10 +68,42 @@ open class LlmChatViewModelBase(
   /** Whether model replies are spoken aloud with the device's text-to-speech engine. */
   val speakReplies = _speakReplies.asStateFlow()
 
+  private val _handsFreeMode = MutableStateFlow(false)
+  /**
+   * Hands-free voice loop: replies are spoken aloud, and when speech finishes the audio recorder
+   * re-opens automatically; recorded clips auto-send on silence.
+   */
+  val handsFreeMode = _handsFreeMode.asStateFlow()
+
   fun setSpeakReplies(enabled: Boolean) {
     _speakReplies.value = enabled
     if (!enabled) {
       ttsHelper?.stop()
+    }
+  }
+
+  fun setHandsFreeMode(enabled: Boolean) {
+    _handsFreeMode.value = enabled
+    _speakReplies.value = enabled
+    autoSendRecordedAudio.value = enabled
+    if (enabled) {
+      ttsHelper?.onQueueIdle = { rearmHandsFreeLoop() }
+      // Kick off the loop: listen for the first utterance right away.
+      rearmHandsFreeLoop()
+    } else {
+      ttsHelper?.onQueueIdle = null
+      ttsHelper?.stop()
+      openAudioRecorderTrigger.value = 0L
+    }
+  }
+
+  /**
+   * Re-opens the hands-free microphone if the mode is on. Called when speech for a reply finishes,
+   * when a turn ends without speech (errors, Stop), and when the app returns to the foreground.
+   */
+  fun rearmHandsFreeLoop() {
+    if (_handsFreeMode.value) {
+      openAudioRecorderTrigger.value++
     }
   }
 
@@ -83,6 +115,7 @@ open class LlmChatViewModelBase(
   }
 
   override fun onCleared() {
+    ttsHelper?.onQueueIdle = null
     ttsHelper?.stop()
     super.onCleared()
   }
@@ -315,6 +348,7 @@ open class LlmChatViewModelBase(
           setInProgress(false)
           setPreparing(false)
           onError(message)
+          rearmHandsFreeLoop()
         }
 
         val enableThinking =
@@ -339,6 +373,7 @@ open class LlmChatViewModelBase(
         setInProgress(false)
         setPreparing(false)
         onError(e.message ?: "")
+        rearmHandsFreeLoop()
       }
     }
   }
@@ -351,6 +386,7 @@ open class LlmChatViewModelBase(
     }
     setInProgress(false)
     model.runtimeHelper.stopResponse(model)
+    rearmHandsFreeLoop()
     Log.d(TAG, "Done stopping response")
   }
 
@@ -475,7 +511,8 @@ class LlmChatViewModel
 constructor(
   systemPromptRepository: SystemPromptRepository,
   userDataDataStore: DataStore<UserData>,
-) : LlmChatViewModelBase(systemPromptRepository, userDataDataStore, null)
+  ttsHelper: TtsHelper,
+) : LlmChatViewModelBase(systemPromptRepository, userDataDataStore, null, ttsHelper)
 
 @HiltViewModel
 class LlmAskImageViewModel

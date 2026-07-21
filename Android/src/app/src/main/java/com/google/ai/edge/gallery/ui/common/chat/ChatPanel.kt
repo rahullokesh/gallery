@@ -176,6 +176,9 @@ fun ChatPanel(
       }
       imageCount
     }
+  val openAudioRecorderTrigger by viewModel.openAudioRecorderTrigger.collectAsState()
+  val autoSendRecordedAudio by viewModel.autoSendRecordedAudio.collectAsState()
+
   var curMessage by remember { mutableStateOf("") } // Correct state
   val focusManager = LocalFocusManager.current
 
@@ -664,6 +667,9 @@ fun ChatPanel(
         isResettingSession = uiState.isResettingSession,
         modelPreparing = uiState.preparing,
         imageCount = imageCountToLastConfigChange,
+        openAudioRecorderTrigger = openAudioRecorderTrigger,
+        autoSendRecordedAudio = autoSendRecordedAudio,
+        onAudioRecorderTriggerConsumed = { viewModel.openAudioRecorderTrigger.value = 0L },
         skillCount = skillCount,
         mcpCount = mcpCount,
         modelInitializing =

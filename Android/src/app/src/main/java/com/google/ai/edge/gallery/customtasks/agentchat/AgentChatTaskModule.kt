@@ -118,6 +118,7 @@ private val DEFAULT_SYSTEM_PROMPT_SKILLS_ONLY_TRIMMED =
 
 class AgentChatTask @Inject constructor() : CustomTask {
   private val agentTools: AgentTools = AgentToolsImpl()
+  private val voicePickingTools = VoicePickingTools()
 
   override val task: Task =
     Task(
@@ -144,6 +145,7 @@ class AgentChatTask @Inject constructor() : CustomTask {
     onDone: (String) -> Unit,
   ) {
     val initialSystemPrompt = systemInstruction?.toString() ?: task.defaultSystemPrompt
+    voicePickingTools.reset()
     coroutineScope.launch(Dispatchers.Default) {
       val skillsJob = launch { agentTools.skillManagerViewModel.loadSkills() }
       val mcpJob = launch { agentTools.mcpManagerViewModel.loadMcpServers() }
@@ -170,7 +172,7 @@ class AgentChatTask @Inject constructor() : CustomTask {
         supportAudio = true,
         onDone = onDone,
         systemInstruction = finalSystemInstruction,
-        tools = listOf(tool(agentTools)),
+        tools = listOf(tool(agentTools), tool(voicePickingTools)),
         enableConversationConstrainedDecoding = true,
       )
     }
@@ -193,6 +195,7 @@ class AgentChatTask @Inject constructor() : CustomTask {
       modelManagerViewModel = myData.modelManagerViewModel,
       navigateUp = myData.onNavUp,
       agentTools = agentTools,
+      voicePickingTools = voicePickingTools,
       initialQuery = myData.initialQuery,
     )
   }

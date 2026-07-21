@@ -43,10 +43,17 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Headset
+import androidx.compose.material.icons.rounded.HeadsetOff
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -126,6 +133,7 @@ fun AgentChatScreen(
   modelManagerViewModel: ModelManagerViewModel,
   navigateUp: () -> Unit,
   agentTools: AgentTools,
+  voicePickingTools: VoicePickingTools,
   viewModel: LlmChatViewModel = hiltViewModel(),
   skillManagerViewModel: SkillManagerViewModel = hiltViewModel(),
   mcpManagerViewModel: McpManagerViewModel = hiltViewModel(),
@@ -225,6 +233,21 @@ fun AgentChatScreen(
     }
   }
 
+  val handsFreeMode by viewModel.handsFreeMode.collectAsState()
+
+  // Backgrounding the app stops TTS mid-reply, which suppresses the speech-done signal that keeps
+  // the hands-free loop running. Re-arm the loop whenever the screen comes back to the foreground.
+  val lifecycleOwner = LocalLifecycleOwner.current
+  DisposableEffect(lifecycleOwner) {
+    val observer = LifecycleEventObserver { _, event ->
+      if (event == Lifecycle.Event.ON_RESUME) {
+        viewModel.rearmHandsFreeLoop()
+      }
+    }
+    lifecycleOwner.lifecycle.addObserver(observer)
+    onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+  }
+
   LlmChatScreen(
     modelManagerViewModel = modelManagerViewModel,
     taskId = BuiltInTaskId.LLM_AGENT_CHAT,
@@ -232,6 +255,21 @@ fun AgentChatScreen(
     skillCount = skillCount,
     mcpCount = mcpCount,
     mcpToolsCount = mcpToolsCount,
+    topBarExtraActions = {
+      IconButton(onClick = { viewModel.setHandsFreeMode(!handsFreeMode) }) {
+        Icon(
+          imageVector = if (handsFreeMode) Icons.Rounded.Headset else Icons.Rounded.HeadsetOff,
+          contentDescription =
+            stringResource(
+              if (handsFreeMode) R.string.cd_voice_mode_on else R.string.cd_voice_mode_off
+            ),
+          tint =
+            if (handsFreeMode) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.onSurface,
+          modifier = Modifier.size(20.dp),
+        )
+      }
+    },
     onFirstToken = { model ->
       scope.launch(Dispatchers.Main) {
         updateProgressPanel(viewModel = viewModel, model = model, agentTools = agentTools)
@@ -290,6 +328,7 @@ fun AgentChatScreen(
         task,
         curSystemPrompt,
         agentTools,
+        voicePickingTools,
         onDone = { onDone() },
         initialMessages = initialMessages,
         clearHistory = clearHistory,
@@ -669,6 +708,7 @@ fun AgentChatScreen(
             task,
             curSystemPrompt,
             agentTools,
+            voicePickingTools,
           )
         }
       },
@@ -689,6 +729,7 @@ fun AgentChatScreen(
             task,
             curSystemPrompt,
             agentTools,
+            voicePickingTools,
           )
         }
       },
@@ -756,11 +797,13 @@ private fun resetSessionWithCurrentSkillsAndMcps(
   task: Task,
   curSystemPrompt: String,
   agentTools: AgentTools,
+  voicePickingTools: VoicePickingTools,
   onDone: (Model) -> Unit = {},
   initialMessages: List<ChatMessage> = listOf(),
   clearHistory: Boolean = true,
 ) {
   val model = modelManagerViewModel.uiState.value.selectedModel
+  voicePickingTools.reset()
   val litertMessages = initialMessages.mapNotNull { chatMessage ->
     if (chatMessage is ChatMessageText) {
       if (chatMessage.side == ChatSide.USER) {
@@ -781,7 +824,7 @@ private fun resetSessionWithCurrentSkillsAndMcps(
         skills = skillManagerViewModel.getSelectedSkills(),
         toolsPrompt = toolsPrompt,
       ),
-    tools = listOf(tool(agentTools)),
+    tools = listOf(tool(agentTools), tool(voicePickingTools)),
     supportImage = true,
     supportAudio = true,
     onDone = { onDone(model) },

@@ -17,7 +17,10 @@
 package com.google.ai.edge.gallery.common
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
@@ -63,6 +66,46 @@ class TtsHelper @Inject constructor(@ApplicationContext private val context: Con
   private val earlySentences = mutableListOf<String>()
   private var utteranceCounter = 0
 
+  /**
+   * Invoked on the main thread when all queued speech for the current reply has finished playing
+   * (i.e. [finish] was called and the last utterance completed). Not invoked after [stop].
+   */
+  var onQueueIdle: (() -> Unit)? = null
+
+  private val mainHandler = Handler(Looper.getMainLooper())
+  private val pendingUtteranceIds = mutableSetOf<String>()
+  private var replyFlushed = false
+
+  private val utteranceListener =
+    object : UtteranceProgressListener() {
+      override fun onStart(utteranceId: String?) {}
+
+      override fun onDone(utteranceId: String?) = onUtteranceFinished(utteranceId)
+
+      @Deprecated("Deprecated in Java")
+      override fun onError(utteranceId: String?) = onUtteranceFinished(utteranceId)
+
+      override fun onError(utteranceId: String?, errorCode: Int) = onUtteranceFinished(utteranceId)
+
+      override fun onStop(utteranceId: String?, interrupted: Boolean) =
+        onUtteranceFinished(utteranceId)
+    }
+
+  private fun onUtteranceFinished(utteranceId: String?) {
+    synchronized(lock) {
+      pendingUtteranceIds.remove(utteranceId)
+      maybeFireQueueIdle()
+    }
+  }
+
+  // Must be called while holding [lock].
+  private fun maybeFireQueueIdle() {
+    if (replyFlushed && !muted && pendingUtteranceIds.isEmpty()) {
+      replyFlushed = false
+      mainHandler.post { onQueueIdle?.invoke() }
+    }
+  }
+
   // Engines to try in order; null means the system default. Some OEM frameworks (e.g. Samsung's)
   // reject default-engine resolution for sideloaded apps, while an explicitly named engine binds
   // fine.
@@ -88,6 +131,7 @@ class TtsHelper @Inject constructor(@ApplicationContext private val context: Con
     synchronized(lock) {
       if (status == TextToSpeech.SUCCESS) {
         initState = InitState.READY
+        tts?.setOnUtteranceProgressListener(utteranceListener)
         Log.d(TAG, "Text-to-speech engine ready: ${candidateEngines[engineIndex] ?: "<default>"}")
         for (sentence in earlySentences) {
           speakOut(sentence)
@@ -111,8 +155,10 @@ class TtsHelper @Inject constructor(@ApplicationContext private val context: Con
   fun begin() {
     synchronized(lock) {
       muted = false
+      replyFlushed = false
       pendingText.setLength(0)
       earlySentences.clear()
+      pendingUtteranceIds.clear()
     }
     tts?.stop()
   }
@@ -161,6 +207,8 @@ class TtsHelper @Inject constructor(@ApplicationContext private val context: Con
       val rest = pendingText.toString()
       pendingText.setLength(0)
       enqueue(rest)
+      replyFlushed = true
+      maybeFireQueueIdle()
     }
   }
 
@@ -171,8 +219,10 @@ class TtsHelper @Inject constructor(@ApplicationContext private val context: Con
   fun stop() {
     synchronized(lock) {
       muted = true
+      replyFlushed = false
       pendingText.setLength(0)
       earlySentences.clear()
+      pendingUtteranceIds.clear()
     }
     tts?.stop()
   }
@@ -199,12 +249,14 @@ class TtsHelper @Inject constructor(@ApplicationContext private val context: Con
     var start = 0
     while (start < text.length) {
       val end = minOf(start + maxLength, text.length)
-      tts?.speak(
-        text.substring(start, end),
-        TextToSpeech.QUEUE_ADD,
-        null,
-        "ag-tts-${utteranceCounter++}",
-      )
+      val utteranceId = "ag-tts-${utteranceCounter++}"
+      pendingUtteranceIds.add(utteranceId)
+      val result = tts?.speak(text.substring(start, end), TextToSpeech.QUEUE_ADD, null, utteranceId)
+      if (result != TextToSpeech.SUCCESS) {
+        // Rejected utterances never reach the progress listener; don't let them wedge the
+        // queue-idle signal.
+        pendingUtteranceIds.remove(utteranceId)
+      }
       start = end
     }
   }

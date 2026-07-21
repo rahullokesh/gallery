@@ -41,6 +41,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableLongState
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.derivedStateOf
@@ -74,6 +75,12 @@ import kotlinx.coroutines.launch
 
 private const val TAG = "AGAudioRecorderPanel"
 
+// Hands-free auto-stop tuning: peak PCM16 amplitude that counts as speech, how long a pause ends
+// the utterance, and how often buffered silence is discarded while waiting for speech to start.
+private const val SPEECH_AMPLITUDE_THRESHOLD = 2500
+private const val SILENCE_STOP_MS = 1500L
+private const val NO_SPEECH_TIMEOUT_MS = 8000L
+
 private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
 private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
 private const val PANEL_ALPHA = 0.7f
@@ -101,6 +108,8 @@ fun AudioRecorderPanel(
   onSendAudioClip: (ByteArray) -> Unit,
   onClose: () -> Unit,
   modifier: Modifier = Modifier,
+  autoStart: Boolean = false,
+  autoStopOnSilence: Boolean = false,
 ) {
   val context = LocalContext.current
   val coroutineScope = rememberCoroutineScope()
@@ -112,6 +121,41 @@ fun AudioRecorderPanel(
 
   val elapsedSeconds by remember {
     derivedStateOf { "%.1f".format(elapsedMs.longValue.toFloat() / 1000f) }
+  }
+
+  val beginRecording: () -> Unit = {
+    coroutineScope.launch {
+      if (!isRecording) {
+        isRecording = true
+        startRecording(
+          context = context,
+          audioRecordState = audioRecordState,
+          audioStream = audioStream,
+          elapsedMs = elapsedMs,
+          onAmplitudeChanged = onAmplitudeChanged,
+          onMaxDurationReached = {
+            val curRecordedBytes =
+              stopRecording(audioRecordState = audioRecordState, audioStream = audioStream)
+            onSendAudioClip(curRecordedBytes)
+            isRecording = false
+          },
+          autoStopOnSilence = autoStopOnSilence,
+          onSilenceDetected = {
+            val curRecordedBytes =
+              stopRecording(audioRecordState = audioRecordState, audioStream = audioStream)
+            onSendAudioClip(curRecordedBytes)
+            isRecording = false
+          },
+        )
+      }
+    }
+  }
+
+  // In hands-free mode, start listening as soon as the panel opens.
+  LaunchedEffect(Unit) {
+    if (autoStart) {
+      beginRecording()
+    }
   }
 
   // Cleanup on Composable Disposal.
@@ -180,23 +224,10 @@ fun AudioRecorderPanel(
       IconButton(
         modifier = Modifier.semantics { liveRegion = LiveRegionMode.Assertive },
         onClick = {
-          coroutineScope.launch {
-            if (!isRecording) {
-              isRecording = true
-              startRecording(
-                context = context,
-                audioRecordState = audioRecordState,
-                audioStream = audioStream,
-                elapsedMs = elapsedMs,
-                onAmplitudeChanged = onAmplitudeChanged,
-                onMaxDurationReached = {
-                  val curRecordedBytes =
-                    stopRecording(audioRecordState = audioRecordState, audioStream = audioStream)
-                  onSendAudioClip(curRecordedBytes)
-                  isRecording = false
-                },
-              )
-            } else {
+          if (!isRecording) {
+            beginRecording()
+          } else {
+            coroutineScope.launch {
               val curRecordedBytes =
                 stopRecording(audioRecordState = audioRecordState, audioStream = audioStream)
               onSendAudioClip(curRecordedBytes)
@@ -228,6 +259,8 @@ private suspend fun startRecording(
   elapsedMs: MutableLongState,
   onAmplitudeChanged: (Int) -> Unit,
   onMaxDurationReached: () -> Unit,
+  autoStopOnSilence: Boolean = false,
+  onSilenceDetected: () -> Unit = {},
 ) {
   Log.d(TAG, "Start recording...")
   val minBufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
@@ -250,16 +283,37 @@ private suspend fun startRecording(
     launch(Dispatchers.IO) {
       recorder.startRecording()
 
-      val startMs = System.currentTimeMillis()
+      var startMs = System.currentTimeMillis()
       elapsedMs.longValue = 0L
+      var speechDetected = false
+      var lastLoudMs = startMs
       while (audioRecordState.value?.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
         val bytesRead = recorder.read(buffer, 0, buffer.size)
+        var currentAmplitude = 0
         if (bytesRead > 0) {
-          val currentAmplitude = calculatePeakAmplitude(buffer = buffer, bytesRead = bytesRead)
+          currentAmplitude = calculatePeakAmplitude(buffer = buffer, bytesRead = bytesRead)
           onAmplitudeChanged(currentAmplitude)
           audioStream.write(buffer, 0, bytesRead)
         }
-        elapsedMs.longValue = System.currentTimeMillis() - startMs
+        val nowMs = System.currentTimeMillis()
+        elapsedMs.longValue = nowMs - startMs
+        if (autoStopOnSilence) {
+          if (currentAmplitude >= SPEECH_AMPLITUDE_THRESHOLD) {
+            speechDetected = true
+            lastLoudMs = nowMs
+          }
+          if (speechDetected && nowMs - lastLoudMs >= SILENCE_STOP_MS) {
+            onSilenceDetected()
+            break
+          }
+          if (!speechDetected && elapsedMs.longValue >= NO_SPEECH_TIMEOUT_MS) {
+            // Nothing said yet (e.g. the worker is walking to the location): keep listening, but
+            // drop the buffered silence so the eventual clip stays short.
+            audioStream.reset()
+            startMs = nowMs
+            elapsedMs.longValue = 0L
+          }
+        }
         if (elapsedMs.longValue >= MAX_AUDIO_CLIP_DURATION_SEC * 1000) {
           onMaxDurationReached()
           break

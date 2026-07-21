@@ -102,6 +102,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -143,6 +144,9 @@ import kotlinx.coroutines.launch
 
 private const val TAG = "AGMessageInputText"
 
+// Auto-sent clips shorter than this (~1/4 second of 16 kHz PCM16) are treated as accidental.
+private const val MIN_AUTO_SEND_AUDIO_BYTES = 8000
+
 /**
  * Composable function to display a text input field for composing chat messages.
  *
@@ -182,6 +186,9 @@ fun MessageInputText(
   onImageLimitExceeded: () -> Unit = {},
   onModelNotSupportImage: () -> Unit = {},
   onModelNotSupportAudio: () -> Unit = {},
+  openAudioRecorderTrigger: Long = 0L,
+  autoSendRecordedAudio: Boolean = false,
+  onAudioRecorderTriggerConsumed: () -> Unit = {},
 ) {
   val context = LocalContext.current
   val lifecycleOwner = LocalLifecycleOwner.current
@@ -195,6 +202,10 @@ fun MessageInputText(
   val audioRecorderSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
   var pickedImages by remember { mutableStateOf<List<Bitmap>>(listOf()) }
   var pickedAudioClips by remember { mutableStateOf<List<AudioClip>>(listOf()) }
+  // Read through rememberUpdatedState in long-lived recording callbacks so toggling hands-free
+  // mid-recording is honored instead of using stale captured values.
+  val currentAutoSendRecordedAudio by rememberUpdatedState(autoSendRecordedAudio)
+  val currentInProgress by rememberUpdatedState(inProgress)
   var hasFrontCamera by remember { mutableStateOf(false) }
   val sensorObserver = remember { SensorObserver(context) }
 
@@ -262,6 +273,20 @@ fun MessageInputText(
         handleClickRecordAudioClip()
       }
     }
+
+  // Hands-free voice mode: open the audio recorder whenever the trigger advances. Also keyed on
+  // inProgress so a trigger that arrives mid-generation opens the recorder once the turn ends;
+  // the trigger is reset ("consumed") on open so stale values can't re-open the recorder later.
+  LaunchedEffect(openAudioRecorderTrigger, inProgress) {
+    if (openAudioRecorderTrigger > 0L && showAudioPicker && !showAudioRecorder && !inProgress) {
+      onAudioRecorderTriggerConsumed()
+      when (PackageManager.PERMISSION_GRANTED) {
+        ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ->
+          handleClickRecordAudioClip()
+        else -> recordAudioClipsPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+      }
+    }
+  }
 
   // Registers a photo picker activity launcher in single-select mode.
   val pickMedia =
@@ -770,12 +795,30 @@ fun MessageInputText(
               task = task,
               onSendAudioClip = { audioData ->
                 scope.launch {
-                  updatePickedAudioClips(
-                    listOf(AudioClip(audioData = audioData, sampleRate = SAMPLE_RATE))
-                  )
-                  audioRecorderSheetState.hide()
-                  showAudioRecorder = false
-                  onSetAudioRecorderVisible(false)
+                  if (currentAutoSendRecordedAudio) {
+                    audioRecorderSheetState.hide()
+                    showAudioRecorder = false
+                    onSetAudioRecorderVisible(false)
+                    // Ignore accidental blips that contain no real speech, and don't send while
+                    // another generation is running.
+                    if (audioData.size >= MIN_AUTO_SEND_AUDIO_BYTES && !currentInProgress) {
+                      onSendMessage(
+                        createMessagesToSend(
+                          pickedImages = listOf(),
+                          audioClips =
+                            listOf(AudioClip(audioData = audioData, sampleRate = SAMPLE_RATE)),
+                          text = "",
+                        )
+                      )
+                    }
+                  } else {
+                    updatePickedAudioClips(
+                      listOf(AudioClip(audioData = audioData, sampleRate = SAMPLE_RATE))
+                    )
+                    audioRecorderSheetState.hide()
+                    showAudioRecorder = false
+                    onSetAudioRecorderVisible(false)
+                  }
                 }
               },
               onAmplitudeChanged = onAmplitudeChanged,
@@ -783,6 +826,8 @@ fun MessageInputText(
                 showAudioRecorder = false
                 onSetAudioRecorderVisible(false)
               },
+              autoStart = autoSendRecordedAudio,
+              autoStopOnSilence = autoSendRecordedAudio,
             )
         }
       }

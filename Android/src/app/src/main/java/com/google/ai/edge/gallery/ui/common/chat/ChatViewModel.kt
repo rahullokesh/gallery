@@ -73,6 +73,12 @@ abstract class ChatViewModel(val userDataDataStore: DataStore<UserData>? = null)
   /** Called when the audio recorder panel is shown or hidden. */
   open fun onAudioRecorderVisibilityChanged(visible: Boolean) {}
 
+  /** Incremented to ask the chat input to open the audio recorder (hands-free voice mode). */
+  val openAudioRecorderTrigger = MutableStateFlow(0L)
+
+  /** When true, a recorded audio clip is sent immediately instead of being attached for review. */
+  val autoSendRecordedAudio = MutableStateFlow(false)
+
   private val _uiState = MutableStateFlow(createUiState())
   val uiState = _uiState.asStateFlow()
 
