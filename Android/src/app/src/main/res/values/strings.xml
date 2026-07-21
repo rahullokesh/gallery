@@ -38,7 +38,7 @@
   <string name="askimage_emptystate_content" translatable="true">To get started, tap the + below to add an image (max 10 images per chat) and type a prompt to ask a question about it!</string>
   <string name="askimage_emptystate_content_aicore" translatable="true">To get started, tap the + below to add an image (max 1 image per chat) and type a prompt to ask a question about it!</string>
   <string name="askaudio_emptystate_title" translatable="true">Ask Audio</string>
-  <string name="askaudio_emptystate_content" translatable="true">To get started, tap the + below to add a audio clip (limited to 1 clip up to 30 seconds) and type a prompt to transcribe or translate it!</string>
+  <string name="askaudio_emptystate_content" translatable="true">To get started, tap the + below to add a audio clip (1 clip up to 30 seconds per message) and type a prompt to transcribe or translate it!</string>
   <string name="gallery_news_notification_title" translatable="true">Gallery News</string>
   <string name="baseline" translatable="true">Baseline</string>
   <string name="basic_info" translatable="true">Basic info</string>

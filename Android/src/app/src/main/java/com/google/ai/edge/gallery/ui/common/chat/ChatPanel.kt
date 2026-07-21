@@ -176,20 +176,6 @@ fun ChatPanel(
       }
       imageCount
     }
-  val audioClipMesssageCountToLastconfigChange =
-    remember(messages) {
-      var audioClipMessageCount = 0
-      for (message in messages.reversed()) {
-        if (message is ChatMessageConfigValuesChange) {
-          break
-        }
-        if (message is ChatMessageAudioClip) {
-          audioClipMessageCount++
-        }
-      }
-      audioClipMessageCount
-    }
-
   var curMessage by remember { mutableStateOf("") } // Correct state
   val focusManager = LocalFocusManager.current
 
@@ -678,7 +664,6 @@ fun ChatPanel(
         isResettingSession = uiState.isResettingSession,
         modelPreparing = uiState.preparing,
         imageCount = imageCountToLastConfigChange,
-        audioClipMessageCount = audioClipMesssageCountToLastconfigChange,
         skillCount = skillCount,
         mcpCount = mcpCount,
         modelInitializing =

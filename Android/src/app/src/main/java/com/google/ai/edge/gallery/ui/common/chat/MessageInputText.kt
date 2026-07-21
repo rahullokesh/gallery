@@ -158,7 +158,6 @@ fun MessageInputText(
   isResettingSession: Boolean,
   inProgress: Boolean,
   imageCount: Int,
-  audioClipMessageCount: Int,
   skillCount: Int = 0,
   mcpCount: Int = 0,
   modelInitializing: Boolean,
@@ -222,16 +221,14 @@ fun MessageInputText(
   }
 
   val updatePickedAudioClips: (List<AudioClip>) -> Unit = { audioDataList ->
-    val maxAllowedForThisMessage = (MAX_AUDIO_CLIP_COUNT - audioClipMessageCount).coerceAtLeast(0)
-
     val combinedSize = pickedAudioClips.size + audioDataList.size
-    val withinLimit = combinedSize <= maxAllowedForThisMessage
+    val withinLimit = combinedSize <= MAX_AUDIO_CLIP_COUNT
 
     pickedAudioClips =
       if (withinLimit) {
         pickedAudioClips + audioDataList
       } else {
-        (pickedAudioClips + audioDataList).take(maxAllowedForThisMessage)
+        (pickedAudioClips + audioDataList).take(MAX_AUDIO_CLIP_COUNT)
       }
   }
 
@@ -544,7 +541,7 @@ fun MessageInputText(
                       // Audio related menu items.
                       if (showAudioPicker) {
                         val enableRecordAudioClipMenuItems =
-                          (audioClipMessageCount + pickedAudioClips.size) < MAX_AUDIO_CLIP_COUNT
+                          pickedAudioClips.size < MAX_AUDIO_CLIP_COUNT
                         val isAudioSupported = modelManagerUiState.selectedModel.llmSupportAudio
                         val audioItemColors =
                           MenuDefaults.itemColors(
