@@ -249,10 +249,22 @@ fun VoicePickerScreen(
     )
   }
 
-  fun speakLocalPrompt(prompt: String, speakingState: VoicePickerState) {
+  fun speakLocalPrompt(
+    prompt: String,
+    speakingState: VoicePickerState,
+    appendCurrentItemName: Boolean = false,
+  ) {
+    val workerPrompt =
+      if (appendCurrentItemName) {
+        val itemName = voicePickerTask?.voicePickingTools?.getCurrentPickItemName()
+        val workerItemName = itemName?.replace("USB C", "USB-C")
+        if (workerItemName != null) "${prompt.removeSuffix(".")} for $workerItemName." else prompt
+      } else {
+        prompt
+      }
     state = speakingState
-    addTranscriptLine("Agent", prompt)
-    viewModel.speakLocalPrompt(prompt)
+    addTranscriptLine("Agent", workerPrompt)
+    viewModel.speakLocalPrompt(workerPrompt)
   }
 
   Scaffold(
@@ -313,7 +325,13 @@ fun VoicePickerScreen(
                   )
                 VoicePickerState.WAITING_FOR_ITEM_LOCATION -> {
                   val prompt = voicePickerTask?.voicePickingTools?.confirmItemLocated()?.get("sayText") as? String
-                  if (prompt != null) speakLocalPrompt(prompt, VoicePickerState.LOCAL_PICK_PROMPT)
+                  if (prompt != null) {
+                    speakLocalPrompt(
+                      prompt = prompt,
+                      speakingState = VoicePickerState.LOCAL_PICK_PROMPT,
+                      appendCurrentItemName = true,
+                    )
+                  }
                 }
                 VoicePickerState.LISTENING_FOR_PICK_CONFIRMATION ->
                   sendAudio(

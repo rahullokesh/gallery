@@ -289,6 +289,9 @@ class VoicePickingTools : ToolSet {
     VoicePickingModelCheckpoint(phase = phase.name, lastValidInstruction = lastValidInstruction)
 
   @Synchronized
+  fun getCurrentPickItemName(): String? = currentPick?.itemName
+
+  @Synchronized
   @Tool(
     description =
       "Repeat the current instruction. Call when the worker says 'repeat' or 'say again', or when " +
