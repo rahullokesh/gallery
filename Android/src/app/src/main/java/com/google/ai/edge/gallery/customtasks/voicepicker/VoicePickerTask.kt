@@ -28,6 +28,7 @@ import com.google.ai.edge.gallery.data.Task
 import com.google.ai.edge.gallery.ui.llmchat.LlmChatModelHelper
 import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.tool
+import com.google.ai.edge.litertlm.ToolProvider
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -38,6 +39,11 @@ import kotlinx.coroutines.CoroutineScope
 /** Registers the dedicated Voice Picker page on the Gallery home screen. */
 class VoicePickerTask : CustomTask {
   val voicePickingTools = VoicePickingTools()
+
+  fun conversationSystemInstruction(): Contents = Contents.of(VOICE_PICKER_SYSTEM_PROMPT)
+
+  fun conversationTools(): List<ToolProvider> = listOf(tool(voicePickingTools))
+
   override val task =
     Task(
       id = VOICE_PICKER_TASK_ID,
@@ -65,8 +71,8 @@ class VoicePickerTask : CustomTask {
       supportImage = false,
       supportAudio = true,
       onDone = onDone,
-      systemInstruction = Contents.of(VOICE_PICKER_SYSTEM_PROMPT),
-      tools = listOf(tool(voicePickingTools)),
+      systemInstruction = conversationSystemInstruction(),
+      tools = conversationTools(),
       enableConversationConstrainedDecoding = true,
     )
   }
@@ -90,6 +96,9 @@ private const val VOICE_PICKER_SYSTEM_PROMPT =
   phrases such as "I found it" call confirm_item_located. Three digits alone verify a location,
   and item digits plus a quantity confirm a pick. After a tool returns, reply with exactly its
   sayText value and nothing else.
+  Treat the routing context included with each new audio clip as authoritative. Extract numeric
+  values only from that new audio clip; never substitute values from a previous instruction,
+  correction, or conversation turn.
   Never invent warehouse data, items, quantities, or locations.
   """
 

@@ -134,6 +134,30 @@ open class LlmChatViewModelBase(
   }
 
   /**
+   * Recreates only the model conversation for a stateless routing turn. This deliberately leaves
+   * the caller's deterministic workflow state untouched and does not re-arm the microphone.
+   */
+  fun resetConversationForFreshTurn(
+    model: Model,
+    systemInstruction: Contents,
+    tools: List<ToolProvider>,
+    initialMessages: List<Message> = listOf(),
+    onDone: () -> Unit,
+  ) {
+    viewModelScope.launch(Dispatchers.Default) {
+      model.runtimeHelper.resetConversation(
+        model = model,
+        supportAudio = true,
+        systemInstruction = systemInstruction,
+        tools = tools,
+        enableConversationConstrainedDecoding = true,
+        initialMessages = initialMessages,
+      )
+      onDone()
+    }
+  }
+
+  /**
    * Re-opens the hands-free microphone if the mode is on. Called when speech for a reply finishes,
    * when a turn ends without speech (errors, Stop), and when the app returns to the foreground.
    */

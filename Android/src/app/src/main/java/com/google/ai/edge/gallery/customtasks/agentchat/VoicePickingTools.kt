@@ -62,6 +62,14 @@ private fun spellDigits(digits: String): String = digits.toCharArray().joinToStr
 
 private fun String.digitsOnly(): String = filter { it.isDigit() }
 
+/** The most recent tool input and deterministic validation result, exposed for Voice Picker debug UI. */
+data class VoicePickingToolTrace(
+  val tool: String,
+  val interpreted: String,
+  val expected: String? = null,
+  val accepted: Boolean? = null,
+)
+
 /**
  * Tools backing the voice-picking demo skill.
  *
@@ -84,6 +92,7 @@ class VoicePickingTools : ToolSet {
   private var pickIndex = 0
   private var phase = Phase.NOT_STARTED
   private var lastSayText = SIGN_ON_PROMPT
+  private var lastToolTrace: VoicePickingToolTrace? = null
 
   private val currentPick: Pick?
     get() = order?.picks?.getOrNull(pickIndex)
@@ -95,6 +104,7 @@ class VoicePickingTools : ToolSet {
     pickIndex = 0
     phase = Phase.NOT_STARTED
     lastSayText = SIGN_ON_PROMPT
+    lastToolTrace = null
   }
 
   @Synchronized
@@ -110,8 +120,10 @@ class VoicePickingTools : ToolSet {
     Log.d(TAG, "startOrder($orderNumber)")
     val matched = MOCK_ORDERS.find { it.orderNumber == normalized }
     if (matched == null) {
+      lastToolTrace = VoicePickingToolTrace("start_order", "order $normalized", accepted = false)
       return say("Order ${spellDigits(normalized.ifEmpty { orderNumber })} not found. $SIGN_ON_PROMPT")
     }
+    lastToolTrace = VoicePickingToolTrace("start_order", "order $normalized", accepted = true)
     order = matched
     pickIndex = 0
     phase = Phase.AWAITING_ARRIVAL
@@ -143,14 +155,30 @@ class VoicePickingTools : ToolSet {
     Log.d(TAG, "verifyCheckDigits($checkDigits) phase=$phase")
     val pick = currentPick ?: return notInSession()
     if (phase != Phase.AWAITING_CHECK_DIGITS) {
+      lastToolTrace = VoicePickingToolTrace("verify_check_digits", checkDigits.digitsOnly(), accepted = false)
       return say(lastSayText)
     }
-    if (checkDigits.digitsOnly() != pick.checkDigits) {
+    val heardDigits = checkDigits.digitsOnly()
+    if (heardDigits != pick.checkDigits) {
+      lastToolTrace =
+        VoicePickingToolTrace(
+          tool = "verify_check_digits",
+          interpreted = heardDigits,
+          expected = pick.checkDigits,
+          accepted = false,
+        )
       return say(
         "Wrong check digits. You should be at ${pick.locatorSpoken}. " +
           "Read the 3 digits printed on the location label."
       )
     }
+    lastToolTrace =
+      VoicePickingToolTrace(
+        tool = "verify_check_digits",
+        interpreted = heardDigits,
+        expected = pick.checkDigits,
+        accepted = true,
+      )
     phase = Phase.AWAITING_ITEM_LOCATION
     return say(
       "Location confirmed. Pick ${pick.quantity} ${pick.itemName}, item ending " +
@@ -182,20 +210,44 @@ class VoicePickingTools : ToolSet {
     val curOrder = order ?: return notInSession()
     val pick = currentPick ?: return notInSession()
     if (phase != Phase.AWAITING_PICK_CONFIRM) {
+      lastToolTrace =
+        VoicePickingToolTrace("confirm_pick", "${itemDigits.digitsOnly()}, quantity $quantity", accepted = false)
       return say(lastSayText)
     }
-    if (itemDigits.digitsOnly() != pick.itemLast3) {
+    val heardItemDigits = itemDigits.digitsOnly()
+    if (heardItemDigits != pick.itemLast3) {
+      lastToolTrace =
+        VoicePickingToolTrace(
+          tool = "confirm_pick",
+          interpreted = "$heardItemDigits, quantity $quantity",
+          expected = "${pick.itemLast3}, quantity ${pick.quantity}",
+          accepted = false,
+        )
       return say(
         "Wrong item. You need the item ending ${spellDigits(pick.itemLast3)}. Check the label and " +
           "try again."
       )
     }
     if (quantity != pick.quantity) {
+      lastToolTrace =
+        VoicePickingToolTrace(
+          tool = "confirm_pick",
+          interpreted = "$heardItemDigits, quantity $quantity",
+          expected = "${pick.itemLast3}, quantity ${pick.quantity}",
+          accepted = false,
+        )
       return say(
         "Quantity should be ${pick.quantity}, you said $quantity. Put the extra back or pick the " +
           "rest, then say the item digits and quantity again."
       )
     }
+    lastToolTrace =
+      VoicePickingToolTrace(
+        tool = "confirm_pick",
+        interpreted = "$heardItemDigits, quantity $quantity",
+        expected = "${pick.itemLast3}, quantity ${pick.quantity}",
+        accepted = true,
+      )
     pickIndex++
     val next = currentPick
     if (next == null) {
@@ -214,6 +266,17 @@ class VoicePickingTools : ToolSet {
   @Synchronized
   fun isComplete(): Boolean = phase == Phase.COMPLETE
 
+  /** True when the last check-digit attempt did not advance the warehouse workflow. */
+  @Synchronized
+  fun isAwaitingCheckDigits(): Boolean = phase == Phase.AWAITING_CHECK_DIGITS
+
+  /** True when the last item/quantity attempt did not advance the warehouse workflow. */
+  @Synchronized
+  fun isAwaitingPickConfirmation(): Boolean = phase == Phase.AWAITING_PICK_CONFIRM
+
+  @Synchronized
+  fun getLastToolTrace(): VoicePickingToolTrace? = lastToolTrace
+
   @Synchronized
   @Tool(
     description =
@@ -222,6 +285,7 @@ class VoicePickingTools : ToolSet {
   )
   fun repeatInstruction(): Map<String, Any> {
     Log.d(TAG, "repeatInstruction phase=$phase")
+    lastToolTrace = VoicePickingToolTrace("repeat_instruction", "repeat", accepted = true)
     return say(lastSayText)
   }
 

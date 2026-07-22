@@ -42,6 +42,7 @@ import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import com.google.ai.edge.gallery.GalleryTopAppBar
 import com.google.ai.edge.gallery.customtasks.voicepicker.VOICE_PICKER_TASK_ID
 import com.google.ai.edge.gallery.customtasks.voicepicker.VoicePickerTask
+import com.google.ai.edge.gallery.customtasks.agentchat.VoicePickingToolTrace
 import com.google.ai.edge.gallery.data.AppBarAction
 import com.google.ai.edge.gallery.data.AppBarActionType
 import com.google.ai.edge.gallery.data.Model
@@ -51,11 +52,13 @@ import com.google.ai.edge.gallery.ui.common.chat.ChatSide
 import com.google.ai.edge.gallery.ui.llmchat.LlmChatViewModel
 import com.google.ai.edge.gallery.ui.modelmanager.ModelInitializationStatusType
 import com.google.ai.edge.gallery.ui.modelmanager.ModelManagerViewModel
+import com.google.ai.edge.litertlm.Message
 
 private const val VOICE_PICKER_SAMPLE_RATE = 16000
 private const val VOICE_PICKER_SILENCE_MS = 1000L
 private const val VOICE_PICKER_SPEECH_THRESHOLD = 3500
 private val TRANSCRIPT_MAX_HEIGHT = 240.dp
+private val TOOL_TRACE_MAX_HEIGHT = 112.dp
 
 private data class VoicePickerTranscriptLine(
   val id: Int,
@@ -72,13 +75,58 @@ private enum class VoicePickerState(val label: String) {
   WAITING_FOR_ARRIVAL("Waiting for arrival signal"),
   LOCAL_LOCATION_PROMPT("Sound detected — prompting for check digits"),
   LISTENING_FOR_CHECK_DIGITS("Listening for location check digits"),
+  SPEAKING_WRONG_CHECK_DIGITS("Gemma is explaining the check-digit mismatch"),
   SPEAKING_ITEM_TASK("Gemma is speaking the item to pick"),
   WAITING_FOR_ITEM_LOCATION("Waiting for item-located signal"),
   LOCAL_PICK_PROMPT("Sound detected — prompting for item and quantity"),
   LISTENING_FOR_PICK_CONFIRMATION("Listening for item and quantity"),
+  SPEAKING_WRONG_PICK_CONFIRMATION("Gemma is explaining the item or quantity mismatch"),
   COMPLETE("Order complete"),
   ERROR("Unable to start Voice Picker"),
 }
+
+private fun routingContextFor(state: VoicePickerState): String =
+  when (state) {
+    VoicePickerState.WAITING_FOR_START ->
+      """
+      Routing context (do not say this aloud): this is a fresh worker clip containing a start-order
+      command. Extract the order number only from this new clip. Do not reuse a prior order number.
+      """.trimIndent()
+    VoicePickerState.LISTENING_FOR_CHECK_DIGITS ->
+      """
+      Routing context (do not say this aloud): this is a fresh worker clip answering the location
+      check-digit prompt. Call verify_check_digits using only the digits audibly present in this
+      new clip. Never reuse digits from an earlier instruction, correction, or conversation turn.
+      Only call repeat_instruction if the new clip explicitly asks to repeat.
+      """.trimIndent()
+    VoicePickerState.LISTENING_FOR_PICK_CONFIRMATION ->
+      """
+      Routing context (do not say this aloud): this is a fresh worker clip confirming the item
+      digits and quantity. Extract both values only from this new clip. Never infer either value
+      from an earlier instruction or conversation turn. Only call repeat_instruction if the new
+      clip explicitly asks to repeat.
+      """.trimIndent()
+    else -> ""
+  }
+
+/**
+ * A compact replayable checkpoint used only after Kotlin rejects a response. It preserves the
+ * worker's place in the flow without exposing target digits or retaining the rejected turn.
+ */
+private fun cleanCheckpointFor(state: VoicePickerState): List<Message> =
+  when (state) {
+    VoicePickerState.LISTENING_FOR_CHECK_DIGITS ->
+      listOf(
+        Message.user("The worker has arrived at the current warehouse location."),
+        Message.model("Read the three check digits on the location label."),
+      )
+    VoicePickerState.LISTENING_FOR_PICK_CONFIRMATION ->
+      listOf(
+        Message.user("The worker has located the requested product."),
+        Message.model("Confirm the item's three ending digits and the quantity picked."),
+      )
+    else -> listOf()
+  }
 
 @Composable
 fun VoicePickerScreen(
@@ -103,6 +151,8 @@ fun VoicePickerScreen(
   var recorderGeneration by remember { mutableIntStateOf(0) }
   var transcript by remember { mutableStateOf(emptyList<VoicePickerTranscriptLine>()) }
   var nextTranscriptId by remember { mutableIntStateOf(0) }
+  var lastToolTrace by remember { mutableStateOf<VoicePickingToolTrace?>(null) }
+  var discardFailedGemmaTurn by remember { mutableStateOf(false) }
 
   fun addTranscriptLine(speaker: String, content: String): Int {
     val id = nextTranscriptId++
@@ -151,8 +201,12 @@ fun VoicePickerScreen(
         when (state) {
           VoicePickerState.SPEAKING_NAVIGATION -> VoicePickerState.WAITING_FOR_ARRIVAL
           VoicePickerState.LOCAL_LOCATION_PROMPT -> VoicePickerState.LISTENING_FOR_CHECK_DIGITS
+          VoicePickerState.SPEAKING_WRONG_CHECK_DIGITS ->
+            VoicePickerState.LISTENING_FOR_CHECK_DIGITS
           VoicePickerState.SPEAKING_ITEM_TASK -> VoicePickerState.WAITING_FOR_ITEM_LOCATION
           VoicePickerState.LOCAL_PICK_PROMPT -> VoicePickerState.LISTENING_FOR_PICK_CONFIRMATION
+          VoicePickerState.SPEAKING_WRONG_PICK_CONFIRMATION ->
+            VoicePickerState.LISTENING_FOR_PICK_CONFIRMATION
           else -> state
         }
       beginListening()
@@ -168,29 +222,64 @@ fun VoicePickerScreen(
     }
   }
 
-  fun sendAudio(audioData: ByteArray, nextState: VoicePickerState) {
+  fun sendAudio(
+    audioData: ByteArray,
+    nextState: VoicePickerState,
+    recoveryState: VoicePickerState? = null,
+    shouldRecover: () -> Boolean = { false },
+  ) {
     val selectedModel = model ?: return
+    val selectedTask = voicePickerTask ?: run {
+      state = VoicePickerState.ERROR
+      return
+    }
+    val routingContext = routingContextFor(state)
     state = VoicePickerState.SENDING_TO_GEMMA
     addTranscriptLine("Worker audio", "Sent to Gemma")
     val agentLineId = addTranscriptLine("Agent", "")
-    viewModel.generateResponse(
-      model = selectedModel,
-      input = "",
-      audioMessages = listOf(ChatMessageAudioClip(audioData, VOICE_PICKER_SAMPLE_RATE, ChatSide.USER)),
-      onFirstToken = { state = VoicePickerState.GEMMA_RESPONDING },
-      onResponseDelta = { delta ->
-        transcript =
-          transcript.map { line ->
-            if (line.id == agentLineId) line.copy(content = line.content + delta) else line
+    fun runInference() {
+      viewModel.generateResponse(
+        model = selectedModel,
+        input = routingContext,
+        audioMessages = listOf(ChatMessageAudioClip(audioData, VOICE_PICKER_SAMPLE_RATE, ChatSide.USER)),
+        onFirstToken = { state = VoicePickerState.GEMMA_RESPONDING },
+        onResponseDelta = { delta ->
+          transcript =
+            transcript.map { line ->
+              if (line.id == agentLineId) line.copy(content = line.content + delta) else line
+            }
+        },
+        onDone = {
+          lastToolTrace = selectedTask.voicePickingTools.getLastToolTrace()
+          val shouldEnterRecovery = recoveryState != null && shouldRecover()
+          if (shouldEnterRecovery) {
+            // The next attempt must not see the rejected audio or its correction. Resetting here
+            // would lose the current reply while it is still being spoken, so reset just before
+            // the retry instead.
+            discardFailedGemmaTurn = true
           }
-      },
-      onDone = {
-        state =
-          if (voicePickerTask?.voicePickingTools?.isComplete() == true) VoicePickerState.COMPLETE
-          else nextState
-      },
-      onError = { state = VoicePickerState.ERROR },
-    )
+          state =
+            when {
+              selectedTask.voicePickingTools.isComplete() -> VoicePickerState.COMPLETE
+              shouldEnterRecovery -> recoveryState
+              else -> nextState
+            }
+        },
+        onError = { state = VoicePickerState.ERROR },
+      )
+    }
+    if (discardFailedGemmaTurn) {
+      discardFailedGemmaTurn = false
+      viewModel.resetConversationForFreshTurn(
+        model = selectedModel,
+        systemInstruction = selectedTask.conversationSystemInstruction(),
+        tools = selectedTask.conversationTools(),
+        initialMessages = cleanCheckpointFor(state),
+        onDone = ::runInference,
+      )
+    } else {
+      runInference()
+    }
   }
 
   fun speakLocalPrompt(prompt: String, speakingState: VoicePickerState) {
@@ -225,7 +314,7 @@ fun VoicePickerScreen(
           )
         }
       }
-      DebugStateCard(state = state, amplitude = amplitude, model = model)
+      DebugStateCard(state = state, amplitude = amplitude, model = model, toolTrace = lastToolTrace)
       ConversationTranscriptCard(transcript)
       if (showRecorder && voiceTask != null) {
         key(recorderGeneration) {
@@ -242,13 +331,25 @@ fun VoicePickerScreen(
                   if (prompt != null) speakLocalPrompt(prompt, VoicePickerState.LOCAL_LOCATION_PROMPT)
                 }
                 VoicePickerState.LISTENING_FOR_CHECK_DIGITS ->
-                  sendAudio(audioData, VoicePickerState.SPEAKING_ITEM_TASK)
+                  sendAudio(
+                    audioData = audioData,
+                    nextState = VoicePickerState.SPEAKING_ITEM_TASK,
+                    recoveryState = VoicePickerState.SPEAKING_WRONG_CHECK_DIGITS,
+                    shouldRecover = { voicePickerTask?.voicePickingTools?.isAwaitingCheckDigits() == true },
+                  )
                 VoicePickerState.WAITING_FOR_ITEM_LOCATION -> {
                   val prompt = voicePickerTask?.voicePickingTools?.confirmItemLocated()?.get("sayText") as? String
                   if (prompt != null) speakLocalPrompt(prompt, VoicePickerState.LOCAL_PICK_PROMPT)
                 }
                 VoicePickerState.LISTENING_FOR_PICK_CONFIRMATION ->
-                  sendAudio(audioData, VoicePickerState.SPEAKING_NAVIGATION)
+                  sendAudio(
+                    audioData = audioData,
+                    nextState = VoicePickerState.SPEAKING_NAVIGATION,
+                    recoveryState = VoicePickerState.SPEAKING_WRONG_PICK_CONFIRMATION,
+                    shouldRecover = {
+                      voicePickerTask?.voicePickingTools?.isAwaitingPickConfirmation() == true
+                    },
+                  )
                 else -> Unit
               }
             },
@@ -314,7 +415,12 @@ private fun ConversationTranscriptCard(transcript: List<VoicePickerTranscriptLin
 }
 
 @Composable
-private fun DebugStateCard(state: VoicePickerState, amplitude: Int, model: Model?) {
+private fun DebugStateCard(
+  state: VoicePickerState,
+  amplitude: Int,
+  model: Model?,
+  toolTrace: VoicePickingToolTrace?,
+) {
   Card(
     modifier = Modifier.fillMaxWidth(),
     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
@@ -327,6 +433,23 @@ private fun DebugStateCard(state: VoicePickerState, amplitude: Int, model: Model
         Text("Speech threshold: $VOICE_PICKER_SPEECH_THRESHOLD")
       }
       Text("Model: ${model?.displayName ?: "No downloaded audio model"}")
+      toolTrace?.let { trace ->
+        val traceScrollState = rememberScrollState()
+        Text("Latest tool call", style = MaterialTheme.typography.titleSmall)
+        Box(modifier = Modifier.fillMaxWidth().heightIn(max = TOOL_TRACE_MAX_HEIGHT)) {
+          Column(
+            modifier = Modifier.fillMaxWidth().verticalScroll(traceScrollState).padding(end = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+          ) {
+            Text(trace.tool)
+            Text("Gemma interpreted: ${trace.interpreted}")
+            trace.expected?.let { Text("Expected: $it") }
+            trace.accepted?.let { accepted ->
+              Text(if (accepted) "Validation: accepted" else "Validation: rejected")
+            }
+          }
+        }
+      }
     }
   }
 }
