@@ -71,6 +71,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
 import com.google.ai.edge.gallery.GalleryEvent
+import com.google.ai.edge.gallery.customtasks.voicepicker.VOICE_PICKER_TASK_ID
 import com.google.ai.edge.gallery.customtasks.common.CustomTaskData
 import com.google.ai.edge.gallery.customtasks.common.CustomTaskDataForBuiltinTask
 import com.google.ai.edge.gallery.data.ModelDownloadStatusType
@@ -99,6 +100,7 @@ private const val ROUTE_MODEL = "route_model"
 private const val ROUTE_BENCHMARK = "benchmark"
 private const val ROUTE_MODEL_MANAGER = "model_manager"
 private const val ROUTE_NOTIFICATIONS = "notifications"
+private const val ROUTE_VOICE_PICKER = "voice_picker"
 private const val ENTER_ANIMATION_DURATION_MS = 500
 private val ENTER_ANIMATION_EASING = EaseOutExpo
 private const val ENTER_ANIMATION_DELAY_MS = 100
@@ -203,9 +205,13 @@ fun GalleryNavHost(
             tosViewModel = hiltViewModel(),
             enableAnimation = enableHomeScreenAnimation,
             navigateToTaskScreen = { task ->
-              pickedTask = task
-              enableModelListAnimation = true
-              navController.navigate(ROUTE_MODEL_LIST)
+              if (task.id == VOICE_PICKER_TASK_ID) {
+                navController.navigate(ROUTE_VOICE_PICKER)
+              } else {
+                pickedTask = task
+                enableModelListAnimation = true
+                navController.navigate(ROUTE_MODEL_LIST)
+              }
               firebaseAnalytics?.logEvent(
                 GalleryEvent.CAPABILITY_SELECT.id,
                 Bundle().apply { putString("capability_name", task.id) },
@@ -251,6 +257,17 @@ fun GalleryNavHost(
           }
         }
       }
+    }
+
+    composable(
+      route = ROUTE_VOICE_PICKER,
+      enterTransition = { slideEnter() },
+      exitTransition = { slideExit() },
+    ) {
+      VoicePickerScreen(
+        modelManagerViewModel = modelManagerViewModel,
+        onNavigateUp = { navController.navigateUp() },
+      )
     }
 
     // Model list.

@@ -110,6 +110,8 @@ fun AudioRecorderPanel(
   modifier: Modifier = Modifier,
   autoStart: Boolean = false,
   autoStopOnSilence: Boolean = false,
+  silenceStopMs: Long = SILENCE_STOP_MS,
+  speechAmplitudeThreshold: Int = SPEECH_AMPLITUDE_THRESHOLD,
 ) {
   val context = LocalContext.current
   val coroutineScope = rememberCoroutineScope()
@@ -140,6 +142,8 @@ fun AudioRecorderPanel(
             isRecording = false
           },
           autoStopOnSilence = autoStopOnSilence,
+          silenceStopMs = silenceStopMs,
+          speechAmplitudeThreshold = speechAmplitudeThreshold,
           onSilenceDetected = {
             val curRecordedBytes =
               stopRecording(audioRecordState = audioRecordState, audioStream = audioStream)
@@ -260,6 +264,8 @@ private suspend fun startRecording(
   onAmplitudeChanged: (Int) -> Unit,
   onMaxDurationReached: () -> Unit,
   autoStopOnSilence: Boolean = false,
+  silenceStopMs: Long = SILENCE_STOP_MS,
+  speechAmplitudeThreshold: Int = SPEECH_AMPLITUDE_THRESHOLD,
   onSilenceDetected: () -> Unit = {},
 ) {
   Log.d(TAG, "Start recording...")
@@ -298,11 +304,11 @@ private suspend fun startRecording(
         val nowMs = System.currentTimeMillis()
         elapsedMs.longValue = nowMs - startMs
         if (autoStopOnSilence) {
-          if (currentAmplitude >= SPEECH_AMPLITUDE_THRESHOLD) {
+          if (currentAmplitude >= speechAmplitudeThreshold) {
             speechDetected = true
             lastLoudMs = nowMs
           }
-          if (speechDetected && nowMs - lastLoudMs >= SILENCE_STOP_MS) {
+          if (speechDetected && nowMs - lastLoudMs >= silenceStopMs) {
             onSilenceDetected()
             break
           }

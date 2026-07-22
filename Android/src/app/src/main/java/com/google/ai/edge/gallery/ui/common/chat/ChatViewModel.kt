@@ -79,6 +79,14 @@ abstract class ChatViewModel(val userDataDataStore: DataStore<UserData>? = null)
   /** When true, a recorded audio clip is sent immediately instead of being attached for review. */
   val autoSendRecordedAudio = MutableStateFlow(false)
 
+  /** True when the next detected voice clip should activate a demo rather than reach the model. */
+  val awaitingVoiceActivation = MutableStateFlow(false)
+
+  /** Called when a voice-activation demo detects its first spoken utterance. */
+  open fun onVoiceActivationDetected() {
+    awaitingVoiceActivation.value = false
+  }
+
   private val _uiState = MutableStateFlow(createUiState())
   val uiState = _uiState.asStateFlow()
 

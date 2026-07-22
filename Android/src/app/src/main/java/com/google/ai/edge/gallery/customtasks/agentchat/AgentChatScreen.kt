@@ -46,6 +46,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Headset
 import androidx.compose.material.icons.rounded.HeadsetOff
+import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.MicOff
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -234,6 +236,7 @@ fun AgentChatScreen(
   }
 
   val handsFreeMode by viewModel.handsFreeMode.collectAsState()
+  val voiceActivationDemoMode by viewModel.voiceActivationDemoMode.collectAsState()
 
   // Backgrounding the app stops TTS mid-reply, which suppresses the speech-done signal that keeps
   // the hands-free loop running. Re-arm the loop whenever the screen comes back to the foreground.
@@ -256,6 +259,22 @@ fun AgentChatScreen(
     mcpCount = mcpCount,
     mcpToolsCount = mcpToolsCount,
     topBarExtraActions = {
+      IconButton(
+        onClick = { viewModel.setVoiceActivationDemoMode(!voiceActivationDemoMode) }
+      ) {
+        Icon(
+          imageVector = if (voiceActivationDemoMode) Icons.Rounded.Mic else Icons.Rounded.MicOff,
+          contentDescription =
+            stringResource(
+              if (voiceActivationDemoMode) R.string.cd_voice_activation_demo_on
+              else R.string.cd_voice_activation_demo_off
+            ),
+          tint =
+            if (voiceActivationDemoMode) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.onSurface,
+          modifier = Modifier.size(20.dp),
+        )
+      }
       IconButton(onClick = { viewModel.setHandsFreeMode(!handsFreeMode) }) {
         Icon(
           imageVector = if (handsFreeMode) Icons.Rounded.Headset else Icons.Rounded.HeadsetOff,

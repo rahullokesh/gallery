@@ -73,7 +73,9 @@ class VoicePickingTools : ToolSet {
 
   private enum class Phase {
     NOT_STARTED,
+    AWAITING_ARRIVAL,
     AWAITING_CHECK_DIGITS,
+    AWAITING_ITEM_LOCATION,
     AWAITING_PICK_CONFIRM,
     COMPLETE,
   }
@@ -112,12 +114,21 @@ class VoicePickingTools : ToolSet {
     }
     order = matched
     pickIndex = 0
-    phase = Phase.AWAITING_CHECK_DIGITS
+    phase = Phase.AWAITING_ARRIVAL
     val pick = matched.picks[0]
     return say(
       "Order ${spellDigits(matched.orderNumber)} started, ${matched.picks.size} picks. " +
-        "Go to ${pick.locatorSpoken}, and say the 3 check digits on the location label."
+        "Go to ${pick.locatorSpoken}. Speak when you're there."
     )
+  }
+
+  @Synchronized
+  @Tool(description = "Confirm the worker has arrived at the current location. Reply with sayText.")
+  fun confirmArrival(): Map<String, Any> {
+    val pick = currentPick ?: return notInSession()
+    if (phase != Phase.AWAITING_ARRIVAL) return say(lastSayText)
+    phase = Phase.AWAITING_CHECK_DIGITS
+    return say("${pick.locatorSpoken.replaceFirstChar { it.uppercase() }}. Read the 3 check digits on the location label.")
   }
 
   @Synchronized
@@ -140,11 +151,20 @@ class VoicePickingTools : ToolSet {
           "Read the 3 digits printed on the location label."
       )
     }
-    phase = Phase.AWAITING_PICK_CONFIRM
+    phase = Phase.AWAITING_ITEM_LOCATION
     return say(
       "Location confirmed. Pick ${pick.quantity} ${pick.itemName}, item ending " +
-        "${spellDigits(pick.itemLast3)}. Say the item digits and the quantity you picked."
+        "${spellDigits(pick.itemLast3)}. Speak when you've located the item."
     )
+  }
+
+  @Synchronized
+  @Tool(description = "Confirm the worker has located the requested item. Reply with sayText.")
+  fun confirmItemLocated(): Map<String, Any> {
+    val pick = currentPick ?: return notInSession()
+    if (phase != Phase.AWAITING_ITEM_LOCATION) return say(lastSayText)
+    phase = Phase.AWAITING_PICK_CONFIRM
+    return say("Confirm item ending ${spellDigits(pick.itemLast3)} and quantity ${pick.quantity}.")
   }
 
   @Synchronized
@@ -185,12 +205,14 @@ class VoicePickingTools : ToolSet {
           "station ${curOrder.packingStation}. Nice work."
       )
     }
-    phase = Phase.AWAITING_CHECK_DIGITS
+    phase = Phase.AWAITING_ARRIVAL
     return say(
-      "Pick confirmed. Next, go to ${next.locatorSpoken}, and say the 3 check digits on the " +
-        "location label."
+      "Pick confirmed. Next, go to ${next.locatorSpoken}. Speak when you're there."
     )
   }
+
+  @Synchronized
+  fun isComplete(): Boolean = phase == Phase.COMPLETE
 
   @Synchronized
   @Tool(

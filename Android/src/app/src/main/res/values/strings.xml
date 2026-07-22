@@ -536,6 +536,8 @@
   <string name="cd_speak_replies_off">Turn on spoken replies</string>
   <string name="cd_voice_mode_on">Turn off hands-free voice mode</string>
   <string name="cd_voice_mode_off">Turn on hands-free voice mode</string>
+  <string name="cd_voice_activation_demo_on">Turn off voice activation demo</string>
+  <string name="cd_voice_activation_demo_off">Turn on voice activation demo</string>
 
   <!-- Strings for HomeScreen, Model Manager, Settings, and Chat -->
   <!-- Title of the dialog for importing a model. [CHAR_LIMIT=NONE] -->

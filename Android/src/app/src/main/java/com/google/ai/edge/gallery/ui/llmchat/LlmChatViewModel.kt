@@ -53,6 +53,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 private const val TAG = "AGLlmChatViewModel"
+private const val VOICE_ACTIVATION_PROMPT =
+  "Voice picking is ready. Say start order, followed by the order number. For example: start order 4 2."
 
 @OptIn(ExperimentalApi::class)
 open class LlmChatViewModelBase(
@@ -75,6 +77,10 @@ open class LlmChatViewModelBase(
    */
   val handsFreeMode = _handsFreeMode.asStateFlow()
 
+  private val _voiceActivationDemoMode = MutableStateFlow(false)
+  /** A demo-only VAD gate that prompts for an order before the first model turn. */
+  val voiceActivationDemoMode = _voiceActivationDemoMode.asStateFlow()
+
   fun setSpeakReplies(enabled: Boolean) {
     _speakReplies.value = enabled
     if (!enabled) {
@@ -91,10 +97,40 @@ open class LlmChatViewModelBase(
       // Kick off the loop: listen for the first utterance right away.
       rearmHandsFreeLoop()
     } else {
+      _voiceActivationDemoMode.value = false
+      awaitingVoiceActivation.value = false
       ttsHelper?.onQueueIdle = null
       ttsHelper?.stop()
       openAudioRecorderTrigger.value = 0L
     }
+  }
+
+  /**
+   * Starts a demo-only voice-activation flow. The first voice clip is consumed locally and
+   * triggers a spoken prompt; the following clip is sent to the voice-picking agent normally.
+   */
+  fun setVoiceActivationDemoMode(enabled: Boolean) {
+    _voiceActivationDemoMode.value = enabled
+    awaitingVoiceActivation.value = enabled
+    setHandsFreeMode(enabled)
+  }
+
+  override fun onVoiceActivationDetected() {
+    if (!awaitingVoiceActivation.value) return
+    awaitingVoiceActivation.value = false
+    ttsHelper?.begin()
+    ttsHelper?.feed(VOICE_ACTIVATION_PROMPT)
+    ttsHelper?.finish()
+    // If TTS is unavailable, keep the hands-free loop usable rather than leaving it idle.
+    if (ttsHelper == null) rearmHandsFreeLoop()
+  }
+
+  /** Speaks a deterministic local prompt while preserving the hands-free re-listen callback. */
+  fun speakLocalPrompt(text: String) {
+    ttsHelper?.begin()
+    ttsHelper?.feed(text)
+    ttsHelper?.finish()
+    if (ttsHelper == null) rearmHandsFreeLoop()
   }
 
   /**

@@ -14,8 +14,12 @@ speak back the result.
 
 - "start order" followed by a number (e.g. "start order 42", "start order 4 2")
   -> call `start_order` with the digits.
+- Arrival phrases such as "I'm here", "I'm at the location", or "ready"
+  -> call `confirm_arrival`.
 - Exactly 3 digits on their own (e.g. "4 7 2", "472")
   -> call `verify_check_digits` with the digits.
+- Item-location phrases such as "I found it" or "item located"
+  -> call `confirm_item_located`.
 - Item digits plus a quantity (e.g. "9 5 1, picked 3", "951 quantity 3", "208, one")
   -> call `confirm_pick` with the digits and the quantity as a number.
 - "repeat", "say again", "what was that", silence, or anything that matches none of the

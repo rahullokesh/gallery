@@ -1,0 +1,249 @@
+package com.google.ai.edge.gallery.ui.navigation
+
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import com.google.ai.edge.gallery.GalleryTopAppBar
+import com.google.ai.edge.gallery.customtasks.voicepicker.VOICE_PICKER_TASK_ID
+import com.google.ai.edge.gallery.customtasks.voicepicker.VoicePickerTask
+import com.google.ai.edge.gallery.data.AppBarAction
+import com.google.ai.edge.gallery.data.AppBarActionType
+import com.google.ai.edge.gallery.data.Model
+import com.google.ai.edge.gallery.ui.common.chat.AudioRecorderPanel
+import com.google.ai.edge.gallery.ui.common.chat.ChatMessageAudioClip
+import com.google.ai.edge.gallery.ui.common.chat.ChatSide
+import com.google.ai.edge.gallery.ui.llmchat.LlmChatViewModel
+import com.google.ai.edge.gallery.ui.modelmanager.ModelInitializationStatusType
+import com.google.ai.edge.gallery.ui.modelmanager.ModelManagerViewModel
+
+private const val VOICE_PICKER_SAMPLE_RATE = 16000
+private const val VOICE_PICKER_SILENCE_MS = 1000L
+private const val VOICE_PICKER_SPEECH_THRESHOLD = 3500
+
+private enum class VoicePickerState(val label: String) {
+  PREPARING("Preparing on-device model"),
+  WAITING_FOR_START("Ready — say \"Start Order 42\" to start order"),
+  SENDING_TO_GEMMA("Sending audio to Gemma"),
+  GEMMA_RESPONDING("Gemma is responding"),
+  SPEAKING_NAVIGATION("Gemma is speaking the next location"),
+  WAITING_FOR_ARRIVAL("Waiting for arrival signal"),
+  LOCAL_LOCATION_PROMPT("Sound detected — prompting for check digits"),
+  LISTENING_FOR_CHECK_DIGITS("Listening for location check digits"),
+  SPEAKING_ITEM_TASK("Gemma is speaking the item to pick"),
+  WAITING_FOR_ITEM_LOCATION("Waiting for item-located signal"),
+  LOCAL_PICK_PROMPT("Sound detected — prompting for item and quantity"),
+  LISTENING_FOR_PICK_CONFIRMATION("Listening for item and quantity"),
+  COMPLETE("Order complete"),
+  ERROR("Unable to start Voice Picker"),
+}
+
+@Composable
+fun VoicePickerScreen(
+  modelManagerViewModel: ModelManagerViewModel,
+  onNavigateUp: () -> Unit,
+  viewModel: LlmChatViewModel = hiltViewModel(),
+) {
+  val context = LocalContext.current
+  val modelUiState by modelManagerViewModel.uiState.collectAsState()
+  val voiceTask = modelManagerViewModel.getTaskById(VOICE_PICKER_TASK_ID)
+  val voicePickerTask =
+    modelManagerViewModel.getCustomTaskByTaskId(VOICE_PICKER_TASK_ID) as? VoicePickerTask
+  val model =
+    remember(modelUiState.tasks, modelUiState.modelDownloadStatus) {
+      modelManagerViewModel.getAllDownloadedModels().firstOrNull { it.llmSupportAudio }
+    }
+  val modelStatus = model?.let { modelUiState.modelInitializationStatus[it.name]?.status }
+  val recorderTrigger by viewModel.openAudioRecorderTrigger.collectAsState()
+  var state by remember { mutableStateOf(VoicePickerState.PREPARING) }
+  var amplitude by remember { mutableIntStateOf(0) }
+  var showRecorder by remember { mutableStateOf(false) }
+  var recorderGeneration by remember { mutableIntStateOf(0) }
+
+  val permissionLauncher =
+    rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+      if (granted) viewModel.rearmHandsFreeLoop() else state = VoicePickerState.ERROR
+    }
+
+  fun beginListening() {
+    if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+      showRecorder = true
+      recorderGeneration++
+    } else {
+      permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+    }
+  }
+
+  LaunchedEffect(model, voiceTask) {
+    when {
+      model == null || voiceTask == null -> state = VoicePickerState.ERROR
+      else -> modelManagerViewModel.initializeModel(context, voiceTask, model)
+    }
+  }
+
+  LaunchedEffect(modelStatus) {
+    if (modelStatus == ModelInitializationStatusType.INITIALIZED) {
+      viewModel.setHandsFreeMode(true)
+      state = VoicePickerState.WAITING_FOR_START
+    } else if (modelStatus == ModelInitializationStatusType.ERROR) {
+      state = VoicePickerState.ERROR
+    }
+  }
+
+  LaunchedEffect(recorderTrigger) {
+    if (
+      recorderTrigger > 0L &&
+        modelStatus == ModelInitializationStatusType.INITIALIZED &&
+        state != VoicePickerState.COMPLETE &&
+        state != VoicePickerState.ERROR
+    ) {
+      state =
+        when (state) {
+          VoicePickerState.SPEAKING_NAVIGATION -> VoicePickerState.WAITING_FOR_ARRIVAL
+          VoicePickerState.LOCAL_LOCATION_PROMPT -> VoicePickerState.LISTENING_FOR_CHECK_DIGITS
+          VoicePickerState.SPEAKING_ITEM_TASK -> VoicePickerState.WAITING_FOR_ITEM_LOCATION
+          VoicePickerState.LOCAL_PICK_PROMPT -> VoicePickerState.LISTENING_FOR_PICK_CONFIRMATION
+          else -> state
+        }
+      beginListening()
+    }
+  }
+
+  DisposableEffect(model, voiceTask) {
+    onDispose {
+      viewModel.setHandsFreeMode(false)
+      if (model != null && voiceTask != null) {
+        modelManagerViewModel.cleanupModel(context, voiceTask, model)
+      }
+    }
+  }
+
+  fun sendAudio(audioData: ByteArray, nextState: VoicePickerState) {
+    val selectedModel = model ?: return
+    state = VoicePickerState.SENDING_TO_GEMMA
+    viewModel.generateResponse(
+      model = selectedModel,
+      input = "",
+      audioMessages = listOf(ChatMessageAudioClip(audioData, VOICE_PICKER_SAMPLE_RATE, ChatSide.USER)),
+      onFirstToken = { state = VoicePickerState.GEMMA_RESPONDING },
+      onDone = {
+        state =
+          if (voicePickerTask?.voicePickingTools?.isComplete() == true) VoicePickerState.COMPLETE
+          else nextState
+      },
+      onError = { state = VoicePickerState.ERROR },
+    )
+  }
+
+  fun speakLocalPrompt(prompt: String, speakingState: VoicePickerState) {
+    state = speakingState
+    viewModel.speakLocalPrompt(prompt)
+  }
+
+  Scaffold(
+    topBar = {
+      GalleryTopAppBar(
+        title = "Voice Picker",
+        leftAction = AppBarAction(AppBarActionType.NAVIGATE_UP, onNavigateUp),
+      )
+    }
+  ) { innerPadding ->
+    Column(
+      modifier = Modifier.fillMaxSize().padding(16.dp).padding(innerPadding),
+      verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+      Text("Voice Picker", style = MaterialTheme.typography.headlineMedium)
+      if (state == VoicePickerState.WAITING_FOR_START) {
+        Card(
+          modifier = Modifier.fillMaxWidth(),
+          colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+        ) {
+          Text(
+            text = "Say \"Start Order 42\" to start order",
+            modifier = Modifier.padding(16.dp),
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onPrimaryContainer,
+          )
+        }
+      }
+      DebugStateCard(state = state, amplitude = amplitude, model = model)
+      if (showRecorder && voiceTask != null) {
+        key(recorderGeneration) {
+          AudioRecorderPanel(
+            task = voiceTask,
+            onAmplitudeChanged = { amplitude = it },
+            onSendAudioClip = { audioData ->
+              showRecorder = false
+              when (state) {
+                VoicePickerState.WAITING_FOR_START ->
+                  sendAudio(audioData, VoicePickerState.SPEAKING_NAVIGATION)
+                VoicePickerState.WAITING_FOR_ARRIVAL -> {
+                  val prompt = voicePickerTask?.voicePickingTools?.confirmArrival()?.get("sayText") as? String
+                  if (prompt != null) speakLocalPrompt(prompt, VoicePickerState.LOCAL_LOCATION_PROMPT)
+                }
+                VoicePickerState.LISTENING_FOR_CHECK_DIGITS ->
+                  sendAudio(audioData, VoicePickerState.SPEAKING_ITEM_TASK)
+                VoicePickerState.WAITING_FOR_ITEM_LOCATION -> {
+                  val prompt = voicePickerTask?.voicePickingTools?.confirmItemLocated()?.get("sayText") as? String
+                  if (prompt != null) speakLocalPrompt(prompt, VoicePickerState.LOCAL_PICK_PROMPT)
+                }
+                VoicePickerState.LISTENING_FOR_PICK_CONFIRMATION ->
+                  sendAudio(audioData, VoicePickerState.SPEAKING_NAVIGATION)
+                else -> Unit
+              }
+            },
+            onClose = { showRecorder = false },
+            autoStart = true,
+            autoStopOnSilence = true,
+            silenceStopMs = VOICE_PICKER_SILENCE_MS,
+            speechAmplitudeThreshold = VOICE_PICKER_SPEECH_THRESHOLD,
+          )
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun DebugStateCard(state: VoicePickerState, amplitude: Int, model: Model?) {
+  Card(
+    modifier = Modifier.fillMaxWidth(),
+    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+  ) {
+    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+      Text("Debug status", style = MaterialTheme.typography.titleMedium)
+      Text(state.label, color = MaterialTheme.colorScheme.primary)
+      Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+        Text("Mic level: $amplitude")
+        Text("Speech threshold: $VOICE_PICKER_SPEECH_THRESHOLD")
+      }
+      Text("Model: ${model?.displayName ?: "No downloaded audio model"}")
+    }
+  }
+}

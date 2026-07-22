@@ -188,7 +188,9 @@ fun MessageInputText(
   onModelNotSupportAudio: () -> Unit = {},
   openAudioRecorderTrigger: Long = 0L,
   autoSendRecordedAudio: Boolean = false,
+  awaitingVoiceActivation: Boolean = false,
   onAudioRecorderTriggerConsumed: () -> Unit = {},
+  onVoiceActivationDetected: () -> Unit = {},
 ) {
   val context = LocalContext.current
   val lifecycleOwner = LocalLifecycleOwner.current
@@ -205,6 +207,7 @@ fun MessageInputText(
   // Read through rememberUpdatedState in long-lived recording callbacks so toggling hands-free
   // mid-recording is honored instead of using stale captured values.
   val currentAutoSendRecordedAudio by rememberUpdatedState(autoSendRecordedAudio)
+  val currentAwaitingVoiceActivation by rememberUpdatedState(awaitingVoiceActivation)
   val currentInProgress by rememberUpdatedState(inProgress)
   var hasFrontCamera by remember { mutableStateOf(false) }
   val sensorObserver = remember { SensorObserver(context) }
@@ -799,6 +802,10 @@ fun MessageInputText(
                     audioRecorderSheetState.hide()
                     showAudioRecorder = false
                     onSetAudioRecorderVisible(false)
+                    if (currentAwaitingVoiceActivation) {
+                      onVoiceActivationDetected()
+                      return@launch
+                    }
                     // Ignore accidental blips that contain no real speech, and don't send while
                     // another generation is running.
                     if (audioData.size >= MIN_AUTO_SEND_AUDIO_BYTES && !currentInProgress) {
