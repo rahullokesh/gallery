@@ -42,6 +42,7 @@ import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import com.google.ai.edge.gallery.GalleryTopAppBar
 import com.google.ai.edge.gallery.customtasks.voicepicker.VOICE_PICKER_TASK_ID
 import com.google.ai.edge.gallery.customtasks.voicepicker.VoicePickerTask
+import com.google.ai.edge.gallery.customtasks.agentchat.VoicePickingModelCheckpoint
 import com.google.ai.edge.gallery.customtasks.agentchat.VoicePickingToolTrace
 import com.google.ai.edge.gallery.data.AppBarAction
 import com.google.ai.edge.gallery.data.AppBarActionType
@@ -69,6 +70,7 @@ private data class VoicePickerTranscriptLine(
 private enum class VoicePickerState(val label: String) {
   PREPARING("Preparing on-device model"),
   WAITING_FOR_START("Ready — say \"Start Order 42\" to start order"),
+  SPEAKING_START_ORDER_ERROR("Gemma is explaining the order-start problem"),
   SENDING_TO_GEMMA("Sending audio to Gemma"),
   GEMMA_RESPONDING("Gemma is responding"),
   SPEAKING_NAVIGATION("Gemma is speaking the next location"),
@@ -85,48 +87,21 @@ private enum class VoicePickerState(val label: String) {
   ERROR("Unable to start Voice Picker"),
 }
 
-private fun routingContextFor(state: VoicePickerState): String =
-  when (state) {
-    VoicePickerState.WAITING_FOR_START ->
-      """
-      Routing context (do not say this aloud): this is a fresh worker clip containing a start-order
-      command. Extract the order number only from this new clip. Do not reuse a prior order number.
-      """.trimIndent()
-    VoicePickerState.LISTENING_FOR_CHECK_DIGITS ->
-      """
-      Routing context (do not say this aloud): this is a fresh worker clip answering the location
-      check-digit prompt. Call verify_check_digits using only the digits audibly present in this
-      new clip. Never reuse digits from an earlier instruction, correction, or conversation turn.
-      Only call repeat_instruction if the new clip explicitly asks to repeat.
-      """.trimIndent()
-    VoicePickerState.LISTENING_FOR_PICK_CONFIRMATION ->
-      """
-      Routing context (do not say this aloud): this is a fresh worker clip confirming the item
-      digits and quantity. Extract both values only from this new clip. Never infer either value
-      from an earlier instruction or conversation turn. Only call repeat_instruction if the new
-      clip explicitly asks to repeat.
-      """.trimIndent()
-    else -> ""
-  }
+private fun routingContextFor(checkpoint: VoicePickingModelCheckpoint): String =
+  """
+  Routing context (do not say this aloud): the worker is responding to this exact valid checkpoint.
+  State: ${checkpoint.phase}
+  Last valid system instruction: ${checkpoint.lastValidInstruction}
+  Treat this as the worker's first response to that instruction. Extract values only from the new
+  audio clip. Do not infer values from the instruction. Do not mention this routing context.
+  """.trimIndent()
 
 /**
  * A compact replayable checkpoint used only after Kotlin rejects a response. It preserves the
  * worker's place in the flow without exposing target digits or retaining the rejected turn.
  */
-private fun cleanCheckpointFor(state: VoicePickerState): List<Message> =
-  when (state) {
-    VoicePickerState.LISTENING_FOR_CHECK_DIGITS ->
-      listOf(
-        Message.user("The worker has arrived at the current warehouse location."),
-        Message.model("Read the three check digits on the location label."),
-      )
-    VoicePickerState.LISTENING_FOR_PICK_CONFIRMATION ->
-      listOf(
-        Message.user("The worker has located the requested product."),
-        Message.model("Confirm the item's three ending digits and the quantity picked."),
-      )
-    else -> listOf()
-  }
+private fun cleanCheckpointFor(checkpoint: VoicePickingModelCheckpoint): List<Message> =
+  listOf(Message.model(checkpoint.lastValidInstruction))
 
 @Composable
 fun VoicePickerScreen(
@@ -152,7 +127,6 @@ fun VoicePickerScreen(
   var transcript by remember { mutableStateOf(emptyList<VoicePickerTranscriptLine>()) }
   var nextTranscriptId by remember { mutableIntStateOf(0) }
   var lastToolTrace by remember { mutableStateOf<VoicePickingToolTrace?>(null) }
-  var discardFailedGemmaTurn by remember { mutableStateOf(false) }
 
   fun addTranscriptLine(speaker: String, content: String): Int {
     val id = nextTranscriptId++
@@ -199,6 +173,7 @@ fun VoicePickerScreen(
     ) {
       state =
         when (state) {
+          VoicePickerState.SPEAKING_START_ORDER_ERROR -> VoicePickerState.WAITING_FOR_START
           VoicePickerState.SPEAKING_NAVIGATION -> VoicePickerState.WAITING_FOR_ARRIVAL
           VoicePickerState.LOCAL_LOCATION_PROMPT -> VoicePickerState.LISTENING_FOR_CHECK_DIGITS
           VoicePickerState.SPEAKING_WRONG_CHECK_DIGITS ->
@@ -233,7 +208,8 @@ fun VoicePickerScreen(
       state = VoicePickerState.ERROR
       return
     }
-    val routingContext = routingContextFor(state)
+    val checkpoint = selectedTask.voicePickingTools.getModelCheckpoint()
+    val routingContext = routingContextFor(checkpoint)
     state = VoicePickerState.SENDING_TO_GEMMA
     addTranscriptLine("Worker audio", "Sent to Gemma")
     val agentLineId = addTranscriptLine("Agent", "")
@@ -252,12 +228,6 @@ fun VoicePickerScreen(
         onDone = {
           lastToolTrace = selectedTask.voicePickingTools.getLastToolTrace()
           val shouldEnterRecovery = recoveryState != null && shouldRecover()
-          if (shouldEnterRecovery) {
-            // The next attempt must not see the rejected audio or its correction. Resetting here
-            // would lose the current reply while it is still being spoken, so reset just before
-            // the retry instead.
-            discardFailedGemmaTurn = true
-          }
           state =
             when {
               selectedTask.voicePickingTools.isComplete() -> VoicePickerState.COMPLETE
@@ -268,18 +238,15 @@ fun VoicePickerScreen(
         onError = { state = VoicePickerState.ERROR },
       )
     }
-    if (discardFailedGemmaTurn) {
-      discardFailedGemmaTurn = false
-      viewModel.resetConversationForFreshTurn(
-        model = selectedModel,
-        systemInstruction = selectedTask.conversationSystemInstruction(),
-        tools = selectedTask.conversationTools(),
-        initialMessages = cleanCheckpointFor(state),
-        onDone = ::runInference,
-      )
-    } else {
-      runInference()
-    }
+    // Rebuild a tiny, deterministic conversation for every model turn. The checkpoint advances
+    // only on a valid Kotlin transition, so failures can never enter Gemma's context.
+    viewModel.resetConversationForFreshTurn(
+      model = selectedModel,
+      systemInstruction = selectedTask.conversationSystemInstruction(),
+      tools = selectedTask.conversationTools(),
+      initialMessages = cleanCheckpointFor(checkpoint),
+      onDone = ::runInference,
+    )
   }
 
   fun speakLocalPrompt(prompt: String, speakingState: VoicePickerState) {
@@ -325,7 +292,14 @@ fun VoicePickerScreen(
               showRecorder = false
               when (state) {
                 VoicePickerState.WAITING_FOR_START ->
-                  sendAudio(audioData, VoicePickerState.SPEAKING_NAVIGATION)
+                  sendAudio(
+                    audioData = audioData,
+                    nextState = VoicePickerState.SPEAKING_NAVIGATION,
+                    recoveryState = VoicePickerState.SPEAKING_START_ORDER_ERROR,
+                    shouldRecover = {
+                      voicePickerTask?.voicePickingTools?.isAwaitingStartOrder() == true
+                    },
+                  )
                 VoicePickerState.WAITING_FOR_ARRIVAL -> {
                   val prompt = voicePickerTask?.voicePickingTools?.confirmArrival()?.get("sayText") as? String
                   if (prompt != null) speakLocalPrompt(prompt, VoicePickerState.LOCAL_LOCATION_PROMPT)

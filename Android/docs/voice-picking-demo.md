@@ -88,12 +88,12 @@ stateDiagram-v2
   AWAITING_PICK_CONFIRM --> COMPLETE: final correct pick
 ```
 
-| Current state | System prompt | Next event | Uses Gemma? |
-| --- | --- | --- | --- |
-| `AWAITING_ARRIVAL` | “Go to aisle 12, bay 3, shelf 2. Speak when you’re there.” | Arrival sound | No — local prompt repeats location and asks for check digits. |
-| `AWAITING_CHECK_DIGITS` | “Read the three check digits on the location label.” | Spoken digits | Yes |
-| `AWAITING_ITEM_LOCATION` | “Pick 3 USB-C cables, item ending 951. Speak when you’ve located the item.” | Item-located sound | No — local prompt asks for item and quantity. |
-| `AWAITING_PICK_CONFIRM` | “Confirm item ending 951 and quantity 3.” | Spoken item digits + quantity | Yes |
+| Current state            | System prompt                                                               | Next event                    | Uses Gemma?                                                   |
+| ------------------------ | --------------------------------------------------------------------------- | ----------------------------- | ------------------------------------------------------------- |
+| `AWAITING_ARRIVAL`       | “Go to aisle 12, bay 3, shelf 2. Speak when you’re there.”                  | Arrival sound                 | No — local prompt repeats location and asks for check digits. |
+| `AWAITING_CHECK_DIGITS`  | “Read the three check digits on the location label.”                        | Spoken digits                 | Yes                                                           |
+| `AWAITING_ITEM_LOCATION` | “Pick 3 USB-C cables, item ending 951. Speak when you’ve located the item.” | Item-located sound            | No — local prompt asks for item and quantity.                 |
+| `AWAITING_PICK_CONFIRM`  | “Confirm item ending 951 and quantity 3.”                                   | Spoken item digits + quantity | Yes                                                           |
 
 ## Voice behavior
 
@@ -109,32 +109,32 @@ stateDiagram-v2
 
 ## Demo script — order 42
 
-| | |
-| --- | --- |
-| **Worker** | “start order 4 2” |
-| **System** | “Order 4 2 started, 3 picks. Go to aisle 12, bay 3, shelf 2. Speak when you’re there.” |
-| **Worker** | Arrival signal |
-| **System** | “Aisle 12, bay 3, shelf 2. Read the 3 check digits on the location label.” |
-| **Worker** | “4 7 2” |
+|            |                                                                                                   |
+| ---------- | ------------------------------------------------------------------------------------------------- |
+| **Worker** | “start order 4 2”                                                                                 |
+| **System** | “Order 4 2 started, 3 picks. Go to aisle 12, bay 3, shelf 2. Speak when you’re there.”            |
+| **Worker** | Arrival signal                                                                                    |
+| **System** | “Aisle 12, bay 3, shelf 2. Read the 3 check digits on the location label.”                        |
+| **Worker** | “4 7 2”                                                                                           |
 | **System** | “Location confirmed. Pick 3 USB-C cables, item ending 9 5 1. Speak when you’ve located the item.” |
-| **Worker** | Item-located signal |
-| **System** | “Confirm item ending 9 5 1 and quantity 3.” |
-| **Worker** | “9 5 1, picked 3” |
-| **System** | “Pick confirmed. Next, go to aisle 7, bay 1, shelf 4. Speak when you’re there.” |
+| **Worker** | Item-located signal                                                                               |
+| **System** | “Confirm item ending 9 5 1 and quantity 3.”                                                       |
+| **Worker** | “9 5 1, picked 3”                                                                                 |
+| **System** | “Pick confirmed. Next, go to aisle 7, bay 1, shelf 4. Speak when you’re there.”                   |
 
 The second and third pick follow the same pattern: **815 → 208 × 1**, then **339 → 664 × 5**.
 After the final confirmation: “Order 4 2 complete. Deliver to packing station 4. Nice work.”
 
 ## File map
 
-| Component | File | Role |
-| --- | --- | --- |
-| Voice Picker task | `customtasks/voicepicker/VoicePickerTask.kt` | Initializes the audio model and deterministic tools. |
-| Voice Picker page | `ui/navigation/VoicePickerScreen.kt` | VAD gates, debug states, local prompt transitions, and audio handoff. |
-| Picking tools | `customtasks/agentchat/VoicePickingTools.kt` | Mock orders, state transitions, validation, and all warehouse prompts. |
-| Voice output | `common/TtsHelper.kt` | Sentence-streamed TTS and queue-idle callback. |
-| Voice input | `ui/common/chat/AudioRecorderPanel.kt` | PCM capture, amplitude threshold, and silence stop. |
-| Inference | `ui/llmchat/LlmChatModelHelper.kt` | LiteRT-LM model engine and conversation. |
+| Component         | File                                         | Role                                                                   |
+| ----------------- | -------------------------------------------- | ---------------------------------------------------------------------- |
+| Voice Picker task | `customtasks/voicepicker/VoicePickerTask.kt` | Initializes the audio model and deterministic tools.                   |
+| Voice Picker page | `ui/navigation/VoicePickerScreen.kt`         | VAD gates, debug states, local prompt transitions, and audio handoff.  |
+| Picking tools     | `customtasks/agentchat/VoicePickingTools.kt` | Mock orders, state transitions, validation, and all warehouse prompts. |
+| Voice output      | `common/TtsHelper.kt`                        | Sentence-streamed TTS and queue-idle callback.                         |
+| Voice input       | `ui/common/chat/AudioRecorderPanel.kt`       | PCM capture, amplitude threshold, and silence stop.                    |
+| Inference         | `ui/llmchat/LlmChatModelHelper.kt`           | LiteRT-LM model engine and conversation.                               |
 
 Everything runs on-device: Gemma via LiteRT-LM and the device’s text-to-speech engine. No network
 is used in the picking loop.

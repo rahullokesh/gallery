@@ -15,12 +15,9 @@
  */
 package com.google.ai.edge.gallery.customtasks.agentchat
 
-import android.util.Log
 import com.google.ai.edge.litertlm.Tool
 import com.google.ai.edge.litertlm.ToolParam
 import com.google.ai.edge.litertlm.ToolSet
-
-private const val TAG = "AGVoicePickingTools"
 
 /** One pick line of a mock warehouse order. */
 private data class Pick(
@@ -70,6 +67,12 @@ data class VoicePickingToolTrace(
   val accepted: Boolean? = null,
 )
 
+/** The compact, failure-free context supplied to Gemma for the next worker response. */
+data class VoicePickingModelCheckpoint(
+  val phase: String,
+  val lastValidInstruction: String,
+)
+
 /**
  * Tools backing the voice-picking demo skill.
  *
@@ -92,6 +95,7 @@ class VoicePickingTools : ToolSet {
   private var pickIndex = 0
   private var phase = Phase.NOT_STARTED
   private var lastSayText = SIGN_ON_PROMPT
+  private var lastValidInstruction = SIGN_ON_PROMPT
   private var lastToolTrace: VoicePickingToolTrace? = null
 
   private val currentPick: Pick?
@@ -104,6 +108,7 @@ class VoicePickingTools : ToolSet {
     pickIndex = 0
     phase = Phase.NOT_STARTED
     lastSayText = SIGN_ON_PROMPT
+    lastValidInstruction = SIGN_ON_PROMPT
     lastToolTrace = null
   }
 
@@ -117,7 +122,6 @@ class VoicePickingTools : ToolSet {
     @ToolParam(description = "The spoken order number, digits only.") orderNumber: String
   ): Map<String, Any> {
     val normalized = orderNumber.digitsOnly()
-    Log.d(TAG, "startOrder($orderNumber)")
     val matched = MOCK_ORDERS.find { it.orderNumber == normalized }
     if (matched == null) {
       lastToolTrace = VoicePickingToolTrace("start_order", "order $normalized", accepted = false)
@@ -128,7 +132,7 @@ class VoicePickingTools : ToolSet {
     pickIndex = 0
     phase = Phase.AWAITING_ARRIVAL
     val pick = matched.picks[0]
-    return say(
+    return advance(
       "Order ${spellDigits(matched.orderNumber)} started, ${matched.picks.size} picks. " +
         "Go to ${pick.locatorSpoken}. Speak when you're there."
     )
@@ -140,7 +144,9 @@ class VoicePickingTools : ToolSet {
     val pick = currentPick ?: return notInSession()
     if (phase != Phase.AWAITING_ARRIVAL) return say(lastSayText)
     phase = Phase.AWAITING_CHECK_DIGITS
-    return say("${pick.locatorSpoken.replaceFirstChar { it.uppercase() }}. Read the 3 check digits on the location label.")
+    return advance(
+      "${pick.locatorSpoken.replaceFirstChar { it.uppercase() }}. Read the 3 check digits on the location label."
+    )
   }
 
   @Synchronized
@@ -152,7 +158,6 @@ class VoicePickingTools : ToolSet {
   fun verifyCheckDigits(
     @ToolParam(description = "The 3 spoken check digits, digits only.") checkDigits: String
   ): Map<String, Any> {
-    Log.d(TAG, "verifyCheckDigits($checkDigits) phase=$phase")
     val pick = currentPick ?: return notInSession()
     if (phase != Phase.AWAITING_CHECK_DIGITS) {
       lastToolTrace = VoicePickingToolTrace("verify_check_digits", checkDigits.digitsOnly(), accepted = false)
@@ -180,7 +185,7 @@ class VoicePickingTools : ToolSet {
         accepted = true,
       )
     phase = Phase.AWAITING_ITEM_LOCATION
-    return say(
+    return advance(
       "Location confirmed. Pick ${pick.quantity} ${pick.itemName}, item ending " +
         "${spellDigits(pick.itemLast3)}. Speak when you've located the item."
     )
@@ -192,7 +197,7 @@ class VoicePickingTools : ToolSet {
     val pick = currentPick ?: return notInSession()
     if (phase != Phase.AWAITING_ITEM_LOCATION) return say(lastSayText)
     phase = Phase.AWAITING_PICK_CONFIRM
-    return say("Confirm item ending ${spellDigits(pick.itemLast3)} and quantity ${pick.quantity}.")
+    return advance("Confirm item ending ${spellDigits(pick.itemLast3)} and quantity ${pick.quantity}.")
   }
 
   @Synchronized
@@ -206,7 +211,6 @@ class VoicePickingTools : ToolSet {
     itemDigits: String,
     @ToolParam(description = "How many units the worker picked.") quantity: Int,
   ): Map<String, Any> {
-    Log.d(TAG, "confirmPick($itemDigits, $quantity) phase=$phase")
     val curOrder = order ?: return notInSession()
     val pick = currentPick ?: return notInSession()
     if (phase != Phase.AWAITING_PICK_CONFIRM) {
@@ -252,19 +256,22 @@ class VoicePickingTools : ToolSet {
     val next = currentPick
     if (next == null) {
       phase = Phase.COMPLETE
-      return say(
+      return advance(
         "Pick confirmed. Order ${spellDigits(curOrder.orderNumber)} complete. Deliver to packing " +
           "station ${curOrder.packingStation}. Nice work."
       )
     }
     phase = Phase.AWAITING_ARRIVAL
-    return say(
+    return advance(
       "Pick confirmed. Next, go to ${next.locatorSpoken}. Speak when you're there."
     )
   }
 
   @Synchronized
   fun isComplete(): Boolean = phase == Phase.COMPLETE
+
+  @Synchronized
+  fun isAwaitingStartOrder(): Boolean = phase == Phase.NOT_STARTED
 
   /** True when the last check-digit attempt did not advance the warehouse workflow. */
   @Synchronized
@@ -278,15 +285,23 @@ class VoicePickingTools : ToolSet {
   fun getLastToolTrace(): VoicePickingToolTrace? = lastToolTrace
 
   @Synchronized
+  fun getModelCheckpoint(): VoicePickingModelCheckpoint =
+    VoicePickingModelCheckpoint(phase = phase.name, lastValidInstruction = lastValidInstruction)
+
+  @Synchronized
   @Tool(
     description =
       "Repeat the current instruction. Call when the worker says 'repeat' or 'say again', or when " +
         "their utterance doesn't match any other picking tool. After the tool returns, reply with exactly its sayText, verbatim."
   )
   fun repeatInstruction(): Map<String, Any> {
-    Log.d(TAG, "repeatInstruction phase=$phase")
     lastToolTrace = VoicePickingToolTrace("repeat_instruction", "repeat", accepted = true)
-    return say(lastSayText)
+    return say(lastValidInstruction)
+  }
+
+  private fun advance(text: String): Map<String, Any> {
+    lastValidInstruction = text
+    return say(text)
   }
 
   private fun say(text: String): Map<String, Any> {
