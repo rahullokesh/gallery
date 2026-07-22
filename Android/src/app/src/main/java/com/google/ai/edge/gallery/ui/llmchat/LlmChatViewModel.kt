@@ -219,6 +219,7 @@ open class LlmChatViewModelBase(
     images: List<Bitmap> = listOf(),
     audioMessages: List<ChatMessageAudioClip> = listOf(),
     onFirstToken: (Model) -> Unit = {},
+    onResponseDelta: (String) -> Unit = {},
     onDone: () -> Unit = {},
     onError: (String) -> Unit,
     allowThinking: Boolean = false,
@@ -336,6 +337,9 @@ open class LlmChatViewModelBase(
                 }
                 if (partialResult.isNotEmpty() && _speakReplies.value) {
                   ttsHelper?.feed(partialResult)
+                }
+                if (partialResult.isNotEmpty()) {
+                  onResponseDelta(partialResult)
                 }
               }
 

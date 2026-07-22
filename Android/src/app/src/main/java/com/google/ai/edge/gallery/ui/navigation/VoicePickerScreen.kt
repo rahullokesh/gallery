@@ -4,11 +4,16 @@ import android.Manifest
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -25,7 +30,11 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -46,6 +55,13 @@ import com.google.ai.edge.gallery.ui.modelmanager.ModelManagerViewModel
 private const val VOICE_PICKER_SAMPLE_RATE = 16000
 private const val VOICE_PICKER_SILENCE_MS = 1000L
 private const val VOICE_PICKER_SPEECH_THRESHOLD = 3500
+private val TRANSCRIPT_MAX_HEIGHT = 240.dp
+
+private data class VoicePickerTranscriptLine(
+  val id: Int,
+  val speaker: String,
+  val content: String,
+)
 
 private enum class VoicePickerState(val label: String) {
   PREPARING("Preparing on-device model"),
@@ -85,6 +101,14 @@ fun VoicePickerScreen(
   var amplitude by remember { mutableIntStateOf(0) }
   var showRecorder by remember { mutableStateOf(false) }
   var recorderGeneration by remember { mutableIntStateOf(0) }
+  var transcript by remember { mutableStateOf(emptyList<VoicePickerTranscriptLine>()) }
+  var nextTranscriptId by remember { mutableIntStateOf(0) }
+
+  fun addTranscriptLine(speaker: String, content: String): Int {
+    val id = nextTranscriptId++
+    transcript = (transcript + VoicePickerTranscriptLine(id, speaker, content)).takeLast(20)
+    return id
+  }
 
   val permissionLauncher =
     rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -147,11 +171,19 @@ fun VoicePickerScreen(
   fun sendAudio(audioData: ByteArray, nextState: VoicePickerState) {
     val selectedModel = model ?: return
     state = VoicePickerState.SENDING_TO_GEMMA
+    addTranscriptLine("Worker audio", "Sent to Gemma")
+    val agentLineId = addTranscriptLine("Agent", "")
     viewModel.generateResponse(
       model = selectedModel,
       input = "",
       audioMessages = listOf(ChatMessageAudioClip(audioData, VOICE_PICKER_SAMPLE_RATE, ChatSide.USER)),
       onFirstToken = { state = VoicePickerState.GEMMA_RESPONDING },
+      onResponseDelta = { delta ->
+        transcript =
+          transcript.map { line ->
+            if (line.id == agentLineId) line.copy(content = line.content + delta) else line
+          }
+      },
       onDone = {
         state =
           if (voicePickerTask?.voicePickingTools?.isComplete() == true) VoicePickerState.COMPLETE
@@ -163,6 +195,7 @@ fun VoicePickerScreen(
 
   fun speakLocalPrompt(prompt: String, speakingState: VoicePickerState) {
     state = speakingState
+    addTranscriptLine("Agent", prompt)
     viewModel.speakLocalPrompt(prompt)
   }
 
@@ -193,6 +226,7 @@ fun VoicePickerScreen(
         }
       }
       DebugStateCard(state = state, amplitude = amplitude, model = model)
+      ConversationTranscriptCard(transcript)
       if (showRecorder && voiceTask != null) {
         key(recorderGeneration) {
           AudioRecorderPanel(
@@ -224,6 +258,55 @@ fun VoicePickerScreen(
             silenceStopMs = VOICE_PICKER_SILENCE_MS,
             speechAmplitudeThreshold = VOICE_PICKER_SPEECH_THRESHOLD,
           )
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun ConversationTranscriptCard(transcript: List<VoicePickerTranscriptLine>) {
+  val visibleLines = transcript.filter { it.content.isNotBlank() }
+  if (visibleLines.isEmpty()) return
+  val scrollState = rememberScrollState()
+
+  // Keep short transcripts compact. Once the card reaches its cap, follow new output to the end.
+  LaunchedEffect(visibleLines.size, scrollState.maxValue) {
+    if (scrollState.maxValue > 0) scrollState.scrollTo(scrollState.maxValue)
+  }
+
+  Card(
+    modifier = Modifier.fillMaxWidth(),
+    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+  ) {
+    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+      Text("Conversation transcript", style = MaterialTheme.typography.titleMedium)
+      Box(modifier = Modifier.fillMaxWidth().heightIn(max = TRANSCRIPT_MAX_HEIGHT)) {
+        Column(
+          modifier = Modifier.fillMaxWidth().verticalScroll(scrollState).padding(end = 10.dp),
+          verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+          visibleLines.forEach { line ->
+            Text("${line.speaker}: ${line.content}")
+          }
+        }
+        if (scrollState.maxValue > 0) {
+          Canvas(modifier = Modifier.matchParentSize().align(Alignment.CenterEnd)) {
+            val thumbWidth = 4.dp.toPx()
+            val minimumThumbHeight = 24.dp.toPx()
+            val contentHeight = size.height + scrollState.maxValue
+            val thumbHeight =
+              (size.height * size.height / contentHeight).coerceAtLeast(minimumThumbHeight)
+            val travel = size.height - thumbHeight
+            val progress = scrollState.value.toFloat() / scrollState.maxValue
+            val thumbTop = travel * progress
+            drawRoundRect(
+              color = Color.Gray.copy(alpha = 0.65f),
+              topLeft = Offset(size.width - thumbWidth, thumbTop),
+              size = androidx.compose.ui.geometry.Size(thumbWidth, thumbHeight),
+              cornerRadius = CornerRadius(thumbWidth / 2, thumbWidth / 2),
+            )
+          }
         }
       }
     }
