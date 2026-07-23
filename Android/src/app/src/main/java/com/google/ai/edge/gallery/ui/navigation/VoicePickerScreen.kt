@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -45,6 +46,7 @@ import androidx.core.content.ContextCompat
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import com.google.ai.edge.gallery.GalleryTopAppBar
 import com.google.ai.edge.gallery.customtasks.voicepicker.VOICE_PICKER_TASK_ID
+import com.google.ai.edge.gallery.customtasks.voicepicker.VoicePickerMode
 import com.google.ai.edge.gallery.customtasks.voicepicker.VoicePickerTask
 import com.google.ai.edge.gallery.customtasks.agentchat.VoicePickingModelCheckpoint
 import com.google.ai.edge.gallery.customtasks.agentchat.VoicePickingToolTrace
@@ -86,6 +88,7 @@ private data class WarehouseItem(
 )
 
 private enum class VoicePickerState(val label: String) {
+  SELECTING_MODE("Choose Regular or Fast"),
   PREPARING("Preparing on-device model"),
   WAITING_FOR_START("Ready — say \"Start Order 42\" to start order"),
   SPEAKING_START_ORDER_ERROR("Gemma is explaining the order-start problem"),
@@ -102,6 +105,14 @@ private enum class VoicePickerState(val label: String) {
   LOCAL_PICK_PROMPT("Sound detected — prompting for item and quantity"),
   LISTENING_FOR_PICK_CONFIRMATION("Listening for item and quantity"),
   SPEAKING_WRONG_PICK_CONFIRMATION("Gemma is explaining the item or quantity mismatch"),
+  FAST_SPEAKING_LOCATION("Fast: Gemma is speaking the location and check-digit request"),
+  FAST_LISTENING_FOR_CHECK_DIGITS("Fast: Listening for location check digits"),
+  FAST_SPEAKING_WRONG_CHECK_DIGITS("Fast: Gemma is explaining the check-digit mismatch"),
+  FAST_SPEAKING_ITEM_TASK("Fast: Gemma is speaking the item to pick"),
+  FAST_LISTENING_FOR_PICK_CONFIRMATION("Fast: Listening for item and quantity"),
+  FAST_SPEAKING_WRONG_PICK_CONFIRMATION(
+    "Fast: Gemma is explaining the item or quantity mismatch"
+  ),
   COMPLETE("Order complete"),
   ERROR("Unable to start Voice Picker"),
 }
@@ -133,13 +144,18 @@ fun VoicePickerScreen(
   val voiceTask = modelManagerViewModel.getTaskById(VOICE_PICKER_TASK_ID)
   val voicePickerTask =
     modelManagerViewModel.getCustomTaskByTaskId(VOICE_PICKER_TASK_ID) as? VoicePickerTask
+  var selectedMode by remember { mutableStateOf<VoicePickerMode?>(null) }
   val model =
-    remember(modelUiState.tasks, modelUiState.modelDownloadStatus) {
-      modelManagerViewModel.getAllDownloadedModels().firstOrNull { it.llmSupportAudio }
+    remember(selectedMode, modelUiState.tasks, modelUiState.modelDownloadStatus) {
+      if (selectedMode != null) {
+        modelManagerViewModel.getAllDownloadedModels().firstOrNull { it.llmSupportAudio }
+      } else {
+        null
+      }
     }
   val modelStatus = model?.let { modelUiState.modelInitializationStatus[it.name]?.status }
   val recorderTrigger by viewModel.openAudioRecorderTrigger.collectAsState()
-  var state by remember { mutableStateOf(VoicePickerState.PREPARING) }
+  var state by remember { mutableStateOf(VoicePickerState.SELECTING_MODE) }
   var amplitude by remember { mutableIntStateOf(0) }
   var showRecorder by remember { mutableStateOf(false) }
   var recorderGeneration by remember { mutableIntStateOf(0) }
@@ -148,6 +164,9 @@ fun VoicePickerScreen(
   var lastToolTrace by remember { mutableStateOf<VoicePickingToolTrace?>(null) }
   var showDebugOutput by remember { mutableStateOf(true) }
   var voiceTurnGeneration by remember { mutableIntStateOf(0) }
+  var fastModelResponseFinished by remember { mutableStateOf(true) }
+  var fastLocalSpeechStarted by remember { mutableStateOf(false) }
+  var fastLocalSpeechFinished by remember { mutableStateOf(false) }
   val warehouseItems =
     remember {
       mutableStateListOf(
@@ -177,14 +196,47 @@ fun VoicePickerScreen(
     }
   }
 
-  LaunchedEffect(model, voiceTask) {
+  fun resumeListeningAfterSpeech() {
+    state =
+      when (state) {
+        VoicePickerState.SPEAKING_START_ORDER_ERROR -> VoicePickerState.WAITING_FOR_START
+        VoicePickerState.SPEAKING_WAREHOUSE_UPDATE ->
+          if (selectedMode == VoicePickerMode.FAST) {
+            VoicePickerState.FAST_LISTENING_FOR_CHECK_DIGITS
+          } else {
+            VoicePickerState.WAITING_FOR_ARRIVAL
+          }
+        VoicePickerState.SPEAKING_NAVIGATION -> VoicePickerState.WAITING_FOR_ARRIVAL
+        VoicePickerState.LOCAL_LOCATION_PROMPT -> VoicePickerState.LISTENING_FOR_CHECK_DIGITS
+        VoicePickerState.SPEAKING_WRONG_CHECK_DIGITS ->
+          VoicePickerState.LISTENING_FOR_CHECK_DIGITS
+        VoicePickerState.SPEAKING_ITEM_TASK -> VoicePickerState.WAITING_FOR_ITEM_LOCATION
+        VoicePickerState.LOCAL_PICK_PROMPT -> VoicePickerState.LISTENING_FOR_PICK_CONFIRMATION
+        VoicePickerState.SPEAKING_WRONG_PICK_CONFIRMATION ->
+          VoicePickerState.LISTENING_FOR_PICK_CONFIRMATION
+        VoicePickerState.FAST_SPEAKING_LOCATION ->
+          VoicePickerState.FAST_LISTENING_FOR_CHECK_DIGITS
+        VoicePickerState.FAST_SPEAKING_WRONG_CHECK_DIGITS ->
+          VoicePickerState.FAST_LISTENING_FOR_CHECK_DIGITS
+        VoicePickerState.FAST_SPEAKING_ITEM_TASK ->
+          VoicePickerState.FAST_LISTENING_FOR_PICK_CONFIRMATION
+        VoicePickerState.FAST_SPEAKING_WRONG_PICK_CONFIRMATION ->
+          VoicePickerState.FAST_LISTENING_FOR_PICK_CONFIRMATION
+        else -> state
+      }
+    beginListening()
+  }
+
+  LaunchedEffect(selectedMode, model, voiceTask) {
+    if (selectedMode == null) return@LaunchedEffect
     when {
       model == null || voiceTask == null -> state = VoicePickerState.ERROR
       else -> modelManagerViewModel.initializeModel(context, voiceTask, model)
     }
   }
 
-  LaunchedEffect(modelStatus) {
+  LaunchedEffect(selectedMode, modelStatus) {
+    if (selectedMode == null) return@LaunchedEffect
     if (modelStatus == ModelInitializationStatusType.INITIALIZED) {
       viewModel.setHandsFreeMode(true)
       state = VoicePickerState.WAITING_FOR_START
@@ -200,26 +252,35 @@ fun VoicePickerScreen(
         state != VoicePickerState.COMPLETE &&
         state != VoicePickerState.ERROR
     ) {
-      state =
-        when (state) {
-          VoicePickerState.SPEAKING_START_ORDER_ERROR -> VoicePickerState.WAITING_FOR_START
-          VoicePickerState.SPEAKING_WAREHOUSE_UPDATE -> VoicePickerState.WAITING_FOR_ARRIVAL
-          VoicePickerState.SPEAKING_NAVIGATION -> VoicePickerState.WAITING_FOR_ARRIVAL
-          VoicePickerState.LOCAL_LOCATION_PROMPT -> VoicePickerState.LISTENING_FOR_CHECK_DIGITS
-          VoicePickerState.SPEAKING_WRONG_CHECK_DIGITS ->
-            VoicePickerState.LISTENING_FOR_CHECK_DIGITS
-          VoicePickerState.SPEAKING_ITEM_TASK -> VoicePickerState.WAITING_FOR_ITEM_LOCATION
-          VoicePickerState.LOCAL_PICK_PROMPT -> VoicePickerState.LISTENING_FOR_PICK_CONFIRMATION
-          VoicePickerState.SPEAKING_WRONG_PICK_CONFIRMATION ->
-            VoicePickerState.LISTENING_FOR_PICK_CONFIRMATION
-          else -> state
-        }
-      beginListening()
+      if (
+        selectedMode == VoicePickerMode.FAST &&
+          !fastModelResponseFinished &&
+          fastLocalSpeechStarted
+      ) {
+        fastLocalSpeechFinished = true
+      } else if (selectedMode != VoicePickerMode.FAST || fastModelResponseFinished) {
+        resumeListeningAfterSpeech()
+      }
+    }
+  }
+
+  LaunchedEffect(fastModelResponseFinished, fastLocalSpeechFinished) {
+    if (
+      selectedMode == VoicePickerMode.FAST &&
+        fastModelResponseFinished &&
+        fastLocalSpeechFinished &&
+        modelStatus == ModelInitializationStatusType.INITIALIZED &&
+        state != VoicePickerState.COMPLETE &&
+        state != VoicePickerState.ERROR
+    ) {
+      fastLocalSpeechFinished = false
+      resumeListeningAfterSpeech()
     }
   }
 
   DisposableEffect(model, voiceTask) {
     onDispose {
+      voicePickerTask?.finishFastModelTurn()
       viewModel.setHandsFreeMode(false)
       if (model != null && voiceTask != null) {
         modelManagerViewModel.cleanupModel(context, voiceTask, model)
@@ -238,43 +299,111 @@ fun VoicePickerScreen(
       state = VoicePickerState.ERROR
       return
     }
-    selectedTask.voicePickingTools.syncCancelledWarehouseItems(
+    val mode = selectedMode ?: run {
+      state = VoicePickerState.ERROR
+      return
+    }
+    selectedTask.syncCancelledWarehouseItems(
+      mode,
       warehouseItems.filter { it.status == WarehouseItemStatus.CANCELLED }.map { it.itemEnding }.toSet()
     )
     val turnGeneration = voiceTurnGeneration
-    val checkpoint = selectedTask.voicePickingTools.getModelCheckpoint()
+    val checkpoint = selectedTask.getModelCheckpoint(mode)
     val routingContext = routingContextFor(checkpoint)
+    val isFastMode = mode == VoicePickerMode.FAST
+    var fastToolResultHandled = false
+    var resolvedFastState: VoicePickerState? = null
+
+    fun resolveState(toolCalled: Boolean): VoicePickerState {
+      val shouldEnterRecovery = recoveryState != null && (!toolCalled || shouldRecover())
+      return when {
+        selectedTask.isComplete(mode) -> VoicePickerState.COMPLETE
+        shouldEnterRecovery -> requireNotNull(recoveryState)
+        else -> nextState
+      }
+    }
+
     state = VoicePickerState.SENDING_TO_GEMMA
     addTranscriptLine("Worker audio", "Sent to Gemma")
     val agentLineId = addTranscriptLine("Agent", "")
+    if (isFastMode) {
+      fastModelResponseFinished = false
+      fastLocalSpeechStarted = false
+      fastLocalSpeechFinished = false
+      selectedTask.beginFastModelTurn { workerMessage ->
+        if (turnGeneration == voiceTurnGeneration) {
+          fastToolResultHandled = true
+          lastToolTrace = selectedTask.getLastToolTrace(mode)
+          val resolvedState = resolveState(toolCalled = true)
+          resolvedFastState = resolvedState
+          state = resolvedState
+          transcript =
+            transcript.map { line ->
+              if (line.id == agentLineId) line.copy(content = workerMessage) else line
+            }
+          fastLocalSpeechStarted = true
+          // Fast ends at the tool call. Do not feed the result back through another model pass.
+          viewModel.stopInferenceAfterToolCall(selectedModel)
+          viewModel.speakLocalPrompt(workerMessage)
+        }
+      }
+      // Fast mode speaks the deterministic Kotlin result directly. Raw model text stays muted.
+      viewModel.setSpeakReplies(false)
+    }
     fun runInference() {
       viewModel.generateResponse(
         model = selectedModel,
         input = routingContext,
         audioMessages = listOf(ChatMessageAudioClip(audioData, VOICE_PICKER_SAMPLE_RATE, ChatSide.USER)),
         onFirstToken = {
-          if (turnGeneration == voiceTurnGeneration) state = VoicePickerState.GEMMA_RESPONDING
+          if (
+            turnGeneration == voiceTurnGeneration && (!isFastMode || !fastToolResultHandled)
+          ) {
+            state = VoicePickerState.GEMMA_RESPONDING
+          }
         },
         onResponseDelta = { delta ->
           if (turnGeneration != voiceTurnGeneration) return@generateResponse
-          transcript =
-            transcript.map { line ->
-              if (line.id == agentLineId) line.copy(content = line.content + delta) else line
-            }
+          if (!isFastMode) {
+            transcript =
+              transcript.map { line ->
+                if (line.id == agentLineId) line.copy(content = line.content + delta) else line
+              }
+          }
         },
         onDone = {
           if (turnGeneration != voiceTurnGeneration) return@generateResponse
-          lastToolTrace = selectedTask.voicePickingTools.getLastToolTrace()
-          val shouldEnterRecovery = recoveryState != null && shouldRecover()
-          state =
-            when {
-              selectedTask.voicePickingTools.isComplete() -> VoicePickerState.COMPLETE
-              shouldEnterRecovery -> recoveryState
-              else -> nextState
+          if (isFastMode) {
+            selectedTask.finishFastModelTurn()
+            fastModelResponseFinished = true
+            viewModel.setSpeakReplies(true)
+            if (fastToolResultHandled) {
+              resolvedFastState?.let { state = it }
+            } else {
+              lastToolTrace = null
+              state = resolveState(toolCalled = false)
+              val fallback = "I didn't catch that. ${checkpoint.lastValidInstruction}"
+              transcript =
+                transcript.map { line ->
+                  if (line.id == agentLineId) line.copy(content = fallback) else line
+                }
+              fastLocalSpeechStarted = true
+              viewModel.speakLocalPrompt(fallback)
             }
+          } else {
+            lastToolTrace = selectedTask.getLastToolTrace(mode)
+            state = resolveState(toolCalled = true)
+          }
         },
         onError = {
-          if (turnGeneration == voiceTurnGeneration) state = VoicePickerState.ERROR
+          if (turnGeneration == voiceTurnGeneration) {
+            if (isFastMode) {
+              selectedTask.finishFastModelTurn()
+              fastModelResponseFinished = true
+              viewModel.setSpeakReplies(true)
+            }
+            state = VoicePickerState.ERROR
+          }
         },
       )
     }
@@ -282,8 +411,8 @@ fun VoicePickerScreen(
     // only on a valid Kotlin transition, so failures can never enter Gemma's context.
     viewModel.resetConversationForFreshTurn(
       model = selectedModel,
-      systemInstruction = selectedTask.conversationSystemInstruction(),
-      tools = selectedTask.conversationTools(),
+      systemInstruction = selectedTask.conversationSystemInstruction(mode),
+      tools = selectedTask.conversationTools(mode),
       initialMessages = cleanCheckpointFor(checkpoint),
       onDone = ::runInference,
     )
@@ -296,7 +425,9 @@ fun VoicePickerScreen(
   ) {
     val workerPrompt =
       if (appendCurrentItemName) {
-        val itemName = voicePickerTask?.voicePickingTools?.getCurrentPickItemName()
+        val mode = selectedMode
+        val itemName =
+          if (mode == null) null else voicePickerTask?.getCurrentPickItemName(mode)
         val workerItemName = itemName?.replace("USB C", "USB-C")
         if (workerItemName != null) "${prompt.removeSuffix(".")} for $workerItemName." else prompt
       } else {
@@ -308,16 +439,25 @@ fun VoicePickerScreen(
   }
 
   fun handleWarehouseCancellation(item: WarehouseItem) {
-    val result = voicePickerTask?.voicePickingTools?.cancelWarehouseItem(item.itemEnding) ?: return
+    val mode = selectedMode ?: return
+    val selectedTask = voicePickerTask ?: return
+    val result = selectedTask.cancelWarehouseItem(mode, item.itemEnding)
     if (!result.interruptedActivePick) return
 
     voiceTurnGeneration++
     showRecorder = false
     model?.let { viewModel.interruptForWarehouseUpdate(it) }
+    if (mode == VoicePickerMode.FAST) {
+      selectedTask.finishFastModelTurn()
+      fastModelResponseFinished = true
+      fastLocalSpeechStarted = false
+      fastLocalSpeechFinished = false
+    }
     val message = result.workerMessage ?: return
-    val orderComplete = voicePickerTask.voicePickingTools.isComplete()
+    val orderComplete = selectedTask.isComplete(mode)
     state = if (orderComplete) VoicePickerState.COMPLETE else VoicePickerState.SPEAKING_WAREHOUSE_UPDATE
     addTranscriptLine("Agent", message)
+    if (mode == VoicePickerMode.FAST) viewModel.setSpeakReplies(true)
     viewModel.speakLocalPrompt(message)
   }
 
@@ -334,7 +474,35 @@ fun VoicePickerScreen(
       verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
       Text("Voice Picker", style = MaterialTheme.typography.headlineMedium)
-      if (state == VoicePickerState.WAITING_FOR_START) {
+      if (selectedMode == null) {
+        Text("Choose a mode", style = MaterialTheme.typography.titleMedium)
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+          Button(
+            modifier = Modifier.weight(1f),
+            onClick = {
+              voicePickerTask?.prepareMode(VoicePickerMode.REGULAR)
+              state = VoicePickerState.PREPARING
+              selectedMode = VoicePickerMode.REGULAR
+            },
+          ) {
+            Text("Regular")
+          }
+          Button(
+            modifier = Modifier.weight(1f),
+            onClick = {
+              voicePickerTask?.prepareMode(VoicePickerMode.FAST)
+              state = VoicePickerState.PREPARING
+              selectedMode = VoicePickerMode.FAST
+            },
+          ) {
+            Text("Fast")
+          }
+        }
+      }
+      if (selectedMode != null && state == VoicePickerState.WAITING_FOR_START) {
         Card(
           modifier = Modifier.fillMaxWidth(),
           colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
@@ -347,22 +515,26 @@ fun VoicePickerScreen(
           )
         }
       }
-      Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text("Debug output", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-        Switch(checked = showDebugOutput, onCheckedChange = { showDebugOutput = it })
+      if (selectedMode != null) {
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+          Text("Debug output", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+          Switch(checked = showDebugOutput, onCheckedChange = { showDebugOutput = it })
+        }
       }
-      if (showDebugOutput) {
+      if (selectedMode != null && showDebugOutput) {
         DebugStateCard(state = state, amplitude = amplitude, model = model, toolTrace = lastToolTrace)
       }
-      WarehousePanel(
-        items = warehouseItems,
-        onCancel = { item ->
-          val index = warehouseItems.indexOfFirst { it.id == item.id }
-          if (index >= 0) warehouseItems[index] = item.copy(status = WarehouseItemStatus.CANCELLED)
-          handleWarehouseCancellation(item)
-        },
-      )
-      if (showRecorder && voiceTask != null) {
+      if (selectedMode != null) {
+        WarehousePanel(
+          items = warehouseItems,
+          onCancel = { item ->
+            val index = warehouseItems.indexOfFirst { it.id == item.id }
+            if (index >= 0) warehouseItems[index] = item.copy(status = WarehouseItemStatus.CANCELLED)
+            handleWarehouseCancellation(item)
+          },
+        )
+      }
+      if (selectedMode != null && showRecorder && voiceTask != null) {
         key(recorderGeneration) {
           AudioRecorderPanel(
             task = voiceTask,
@@ -370,15 +542,23 @@ fun VoicePickerScreen(
             onSendAudioClip = { audioData ->
               showRecorder = false
               when (state) {
-                VoicePickerState.WAITING_FOR_START ->
-                  sendAudio(
-                    audioData = audioData,
-                    nextState = VoicePickerState.SPEAKING_NAVIGATION,
-                    recoveryState = VoicePickerState.SPEAKING_START_ORDER_ERROR,
-                    shouldRecover = {
-                      voicePickerTask?.voicePickingTools?.isAwaitingStartOrder() == true
-                    },
-                  )
+                VoicePickerState.WAITING_FOR_START -> {
+                  selectedMode?.let { mode ->
+                    sendAudio(
+                      audioData = audioData,
+                      nextState =
+                        if (mode == VoicePickerMode.FAST) {
+                          VoicePickerState.FAST_SPEAKING_LOCATION
+                        } else {
+                          VoicePickerState.SPEAKING_NAVIGATION
+                        },
+                      recoveryState = VoicePickerState.SPEAKING_START_ORDER_ERROR,
+                      shouldRecover = {
+                        voicePickerTask?.isAwaitingStartOrder(mode) == true
+                      },
+                    )
+                  }
+                }
                 VoicePickerState.WAITING_FOR_ARRIVAL -> {
                   val prompt = voicePickerTask?.voicePickingTools?.confirmArrival()?.get("sayText") as? String
                   if (prompt != null) speakLocalPrompt(prompt, VoicePickerState.LOCAL_LOCATION_PROMPT)
@@ -388,7 +568,9 @@ fun VoicePickerScreen(
                     audioData = audioData,
                     nextState = VoicePickerState.SPEAKING_ITEM_TASK,
                     recoveryState = VoicePickerState.SPEAKING_WRONG_CHECK_DIGITS,
-                    shouldRecover = { voicePickerTask?.voicePickingTools?.isAwaitingCheckDigits() == true },
+                    shouldRecover = {
+                      voicePickerTask?.isAwaitingCheckDigits(VoicePickerMode.REGULAR) == true
+                    },
                   )
                 VoicePickerState.WAITING_FOR_ITEM_LOCATION -> {
                   val prompt = voicePickerTask?.voicePickingTools?.confirmItemLocated()?.get("sayText") as? String
@@ -406,7 +588,25 @@ fun VoicePickerScreen(
                     nextState = VoicePickerState.SPEAKING_NAVIGATION,
                     recoveryState = VoicePickerState.SPEAKING_WRONG_PICK_CONFIRMATION,
                     shouldRecover = {
-                      voicePickerTask?.voicePickingTools?.isAwaitingPickConfirmation() == true
+                      voicePickerTask?.isAwaitingPickConfirmation(VoicePickerMode.REGULAR) == true
+                    },
+                  )
+                VoicePickerState.FAST_LISTENING_FOR_CHECK_DIGITS ->
+                  sendAudio(
+                    audioData = audioData,
+                    nextState = VoicePickerState.FAST_SPEAKING_ITEM_TASK,
+                    recoveryState = VoicePickerState.FAST_SPEAKING_WRONG_CHECK_DIGITS,
+                    shouldRecover = {
+                      voicePickerTask?.isAwaitingCheckDigits(VoicePickerMode.FAST) == true
+                    },
+                  )
+                VoicePickerState.FAST_LISTENING_FOR_PICK_CONFIRMATION ->
+                  sendAudio(
+                    audioData = audioData,
+                    nextState = VoicePickerState.FAST_SPEAKING_LOCATION,
+                    recoveryState = VoicePickerState.FAST_SPEAKING_WRONG_PICK_CONFIRMATION,
+                    shouldRecover = {
+                      voicePickerTask?.isAwaitingPickConfirmation(VoicePickerMode.FAST) == true
                     },
                   )
                 else -> Unit

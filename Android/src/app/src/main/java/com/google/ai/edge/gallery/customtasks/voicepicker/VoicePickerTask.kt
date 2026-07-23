@@ -20,8 +20,12 @@ import android.content.Context
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.runtime.Composable
-import com.google.ai.edge.gallery.customtasks.common.CustomTask
+import com.google.ai.edge.gallery.customtasks.agentchat.FastVoicePickingTools
 import com.google.ai.edge.gallery.customtasks.agentchat.VoicePickingTools
+import com.google.ai.edge.gallery.customtasks.agentchat.VoicePickingModelCheckpoint
+import com.google.ai.edge.gallery.customtasks.agentchat.VoicePickingToolTrace
+import com.google.ai.edge.gallery.customtasks.agentchat.WarehouseCancellationResult
+import com.google.ai.edge.gallery.customtasks.common.CustomTask
 import com.google.ai.edge.gallery.data.Category
 import com.google.ai.edge.gallery.data.Model
 import com.google.ai.edge.gallery.data.Task
@@ -36,13 +40,109 @@ import dagger.hilt.components.SingletonComponent
 import dagger.multibindings.IntoSet
 import kotlinx.coroutines.CoroutineScope
 
+enum class VoicePickerMode {
+  REGULAR,
+  FAST,
+}
+
 /** Registers the dedicated Voice Picker page on the Gallery home screen. */
 class VoicePickerTask : CustomTask {
   val voicePickingTools = VoicePickingTools()
+  val fastVoicePickingTools = FastVoicePickingTools()
+  @Volatile private var activeMode = VoicePickerMode.REGULAR
 
-  fun conversationSystemInstruction(): Contents = Contents.of(VOICE_PICKER_SYSTEM_PROMPT)
+  fun prepareMode(mode: VoicePickerMode) {
+    activeMode = mode
+    resetStateMachine(mode)
+  }
 
-  fun conversationTools(): List<ToolProvider> = listOf(tool(voicePickingTools))
+  fun conversationSystemInstruction(mode: VoicePickerMode = activeMode): Contents =
+    Contents.of(
+      when (mode) {
+        VoicePickerMode.REGULAR -> VOICE_PICKER_SYSTEM_PROMPT
+        VoicePickerMode.FAST -> FAST_VOICE_PICKER_SYSTEM_PROMPT
+      }
+    )
+
+  fun conversationTools(mode: VoicePickerMode = activeMode): List<ToolProvider> =
+    when (mode) {
+      VoicePickerMode.REGULAR -> listOf(tool(voicePickingTools))
+      VoicePickerMode.FAST -> listOf(tool(fastVoicePickingTools))
+    }
+
+  fun resetStateMachine(mode: VoicePickerMode) {
+    when (mode) {
+      VoicePickerMode.REGULAR -> voicePickingTools.reset()
+      VoicePickerMode.FAST -> fastVoicePickingTools.reset()
+    }
+  }
+
+  fun syncCancelledWarehouseItems(mode: VoicePickerMode, itemLast3s: Set<String>) {
+    when (mode) {
+      VoicePickerMode.REGULAR -> voicePickingTools.syncCancelledWarehouseItems(itemLast3s)
+      VoicePickerMode.FAST -> fastVoicePickingTools.syncCancelledWarehouseItems(itemLast3s)
+    }
+  }
+
+  fun getModelCheckpoint(mode: VoicePickerMode): VoicePickingModelCheckpoint =
+    when (mode) {
+      VoicePickerMode.REGULAR -> voicePickingTools.getModelCheckpoint()
+      VoicePickerMode.FAST -> fastVoicePickingTools.getModelCheckpoint()
+    }
+
+  fun getLastToolTrace(mode: VoicePickerMode): VoicePickingToolTrace? =
+    when (mode) {
+      VoicePickerMode.REGULAR -> voicePickingTools.getLastToolTrace()
+      VoicePickerMode.FAST -> fastVoicePickingTools.getLastToolTrace()
+    }
+
+  fun isComplete(mode: VoicePickerMode): Boolean =
+    when (mode) {
+      VoicePickerMode.REGULAR -> voicePickingTools.isComplete()
+      VoicePickerMode.FAST -> fastVoicePickingTools.isComplete()
+    }
+
+  fun isAwaitingStartOrder(mode: VoicePickerMode): Boolean =
+    when (mode) {
+      VoicePickerMode.REGULAR -> voicePickingTools.isAwaitingStartOrder()
+      VoicePickerMode.FAST -> fastVoicePickingTools.isAwaitingStartOrder()
+    }
+
+  fun isAwaitingCheckDigits(mode: VoicePickerMode): Boolean =
+    when (mode) {
+      VoicePickerMode.REGULAR -> voicePickingTools.isAwaitingCheckDigits()
+      VoicePickerMode.FAST -> fastVoicePickingTools.isAwaitingCheckDigits()
+    }
+
+  fun isAwaitingPickConfirmation(mode: VoicePickerMode): Boolean =
+    when (mode) {
+      VoicePickerMode.REGULAR -> voicePickingTools.isAwaitingPickConfirmation()
+      VoicePickerMode.FAST -> fastVoicePickingTools.isAwaitingPickConfirmation()
+    }
+
+  fun getCurrentPickItemName(mode: VoicePickerMode): String? =
+    when (mode) {
+      VoicePickerMode.REGULAR -> voicePickingTools.getCurrentPickItemName()
+      VoicePickerMode.FAST -> fastVoicePickingTools.getCurrentPickItemName()
+    }
+
+  fun beginFastModelTurn(onSayText: ((String) -> Unit)? = null) =
+    fastVoicePickingTools.beginModelTurn(onSayText)
+
+  fun finishFastModelTurn() = fastVoicePickingTools.finishModelTurn()
+
+  fun wasFastToolCalledThisTurn(): Boolean = fastVoicePickingTools.wasToolCalledThisTurn()
+
+  fun getFastLastSayText(): String = fastVoicePickingTools.getLastSayText()
+
+  fun cancelWarehouseItem(
+    mode: VoicePickerMode,
+    itemLast3: String,
+  ): WarehouseCancellationResult =
+    when (mode) {
+      VoicePickerMode.REGULAR -> voicePickingTools.cancelWarehouseItem(itemLast3)
+      VoicePickerMode.FAST -> fastVoicePickingTools.cancelWarehouseItem(itemLast3)
+    }
 
   override val task =
     Task(
@@ -63,7 +163,8 @@ class VoicePickerTask : CustomTask {
     systemInstruction: Contents?,
     onDone: (String) -> Unit,
   ) {
-    voicePickingTools.reset()
+    val mode = activeMode
+    resetStateMachine(mode)
     LlmChatModelHelper.initialize(
       context = context,
       model = model,
@@ -71,8 +172,8 @@ class VoicePickerTask : CustomTask {
       supportImage = false,
       supportAudio = true,
       onDone = onDone,
-      systemInstruction = conversationSystemInstruction(),
-      tools = conversationTools(),
+      systemInstruction = conversationSystemInstruction(mode),
+      tools = conversationTools(mode),
       enableConversationConstrainedDecoding = true,
     )
   }
@@ -100,6 +201,25 @@ private const val VOICE_PICKER_SYSTEM_PROMPT =
   values only from that new audio clip; never substitute values from a previous instruction,
   correction, or conversation turn.
   Never invent warehouse data, items, quantities, or locations.
+  """
+
+private const val FAST_VOICE_PICKER_SYSTEM_PROMPT =
+  """
+  You are a tool-call router for a condensed warehouse voice-picking workflow. You are not a
+  conversational assistant or a transcription service. Never repeat, quote, paraphrase,
+  acknowledge, or transcribe the worker's audio. Your first and only action for every worker
+  utterance must be exactly one tool call. Never output plain text before calling a tool.
+  Start-order phrases call start_order. In the
+  AWAITING_CHECK_DIGITS state, three digits call verify_check_digits. In the
+  AWAITING_PICK_CONFIRM state, item digits plus a quantity call confirm_pick. Repeat requests call
+  repeat_instruction. If the audio is unclear or does not match the expected response for the
+  current state, call repeat_instruction instead of guessing or producing text.
+  End the turn after making the tool call. Do not generate a natural-language response; Android
+  speaks the deterministic tool result directly. Treat the routing context included with each new
+  audio clip as authoritative. Extract numeric values only from that new audio clip; never
+  substitute values from an instruction, correction, or previous turn. Never independently decide
+  whether an answer is correct. Kotlin performs all validation. Never invent warehouse data, items,
+  quantities, or locations.
   """
 
 @Module

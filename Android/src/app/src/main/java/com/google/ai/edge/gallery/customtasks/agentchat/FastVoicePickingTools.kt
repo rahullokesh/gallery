@@ -19,80 +19,18 @@ import com.google.ai.edge.litertlm.Tool
 import com.google.ai.edge.litertlm.ToolParam
 import com.google.ai.edge.litertlm.ToolSet
 
-/** One pick line of a mock warehouse order. */
-internal data class Pick(
-  /** Spoken location instruction, e.g. "aisle 12, bay 3, shelf 2". */
-  val locatorSpoken: String,
-  /** The 3 check digits printed on the location label. */
-  val checkDigits: String,
-  /** Item description spoken to the worker. */
-  val itemName: String,
-  /** Last 3 digits of the item's product code, used to verify the right product. */
-  val itemLast3: String,
-  /** How many units to pick. */
-  val quantity: Int,
-)
-
-internal data class MockOrder(val orderNumber: String, val packingStation: String, val picks: List<Pick>)
-
-internal val MOCK_ORDERS =
-  listOf(
-    MockOrder(
-      orderNumber = "42",
-      packingStation = "4",
-      picks =
-        listOf(
-          Pick("aisle 12, bay 3, shelf 2", "472", "USB C cables", "951", 3),
-          Pick("aisle 7, bay 1, shelf 4", "815", "wireless headphones", "208", 1),
-          Pick("aisle 3, bay 6, shelf 1", "339", "phone cases", "664", 5),
-        ),
-    ),
-    MockOrder(
-      orderNumber = "7",
-      packingStation = "2",
-      picks = listOf(Pick("aisle 5, bay 2, shelf 3", "184", "power banks", "330", 2)),
-    ),
-  )
-
-/** Reads digits with spaces so the TTS engine speaks them one by one ("472" -> "4 7 2"). */
-internal fun spellDigits(digits: String): String = digits.toCharArray().joinToString(" ")
-
-internal fun String.digitsOnly(): String = filter { it.isDigit() }
-
-/** The most recent tool input and deterministic validation result, exposed for Voice Picker debug UI. */
-data class VoicePickingToolTrace(
-  val tool: String,
-  val interpreted: String,
-  val expected: String? = null,
-  val accepted: Boolean? = null,
-)
-
-/** The compact, failure-free context supplied to Gemma for the next worker response. */
-data class VoicePickingModelCheckpoint(
-  val phase: String,
-  val lastValidInstruction: String,
-)
-
-/** Result of a warehouse cancellation requested outside the voice model. */
-data class WarehouseCancellationResult(
-  val interruptedActivePick: Boolean,
-  val workerMessage: String? = null,
-)
-
 /**
- * Tools backing the voice-picking demo skill.
+ * Condensed voice-picking state machine used only by Fast mode.
  *
- * All order data, workflow state, and every sentence spoken to the worker live HERE, in
- * deterministic Kotlin. The model's only job is to route the worker's spoken utterance to the
- * right tool and relay the returned [KEY_SAY] text verbatim.
+ * Unlike [VoicePickingTools], this flow has no arrival or item-location phases. A successful order
+ * start immediately requests location check digits, and successful check digits immediately begin
+ * pick confirmation.
  */
-class VoicePickingTools : ToolSet {
+class FastVoicePickingTools : ToolSet {
 
   private enum class Phase {
     NOT_STARTED,
-    AWAITING_ARRIVAL,
     AWAITING_CHECK_DIGITS,
-    AWAITING_ITEM_LOCATION,
     AWAITING_PICK_CONFIRM,
     COMPLETE,
   }
@@ -103,12 +41,14 @@ class VoicePickingTools : ToolSet {
   private var lastSayText = SIGN_ON_PROMPT
   private var lastValidInstruction = SIGN_ON_PROMPT
   private var lastToolTrace: VoicePickingToolTrace? = null
+  private var toolCalledThisTurn = false
+  private var toolResultDeliveredThisTurn = false
+  private var onToolSayText: ((String) -> Unit)? = null
   private val cancelledItemLast3 = mutableSetOf<String>()
 
   private val currentPick: Pick?
     get() = order?.picks?.getOrNull(pickIndex)
 
-  /** Clears the picking session. Call whenever the chat session is reset or re-initialized. */
   @Synchronized
   fun reset() {
     order = null
@@ -117,18 +57,46 @@ class VoicePickingTools : ToolSet {
     lastSayText = SIGN_ON_PROMPT
     lastValidInstruction = SIGN_ON_PROMPT
     lastToolTrace = null
+    toolCalledThisTurn = false
+    toolResultDeliveredThisTurn = false
+    onToolSayText = null
     cancelledItemLast3.clear()
   }
+
+  /** Clears per-inference evidence so the caller can detect malformed model-only responses. */
+  @Synchronized
+  fun beginModelTurn(onSayText: ((String) -> Unit)? = null) {
+    toolCalledThisTurn = false
+    toolResultDeliveredThisTurn = false
+    lastToolTrace = null
+    onToolSayText = onSayText
+  }
+
+  @Synchronized
+  fun finishModelTurn() {
+    onToolSayText = null
+  }
+
+  @Synchronized
+  fun wasToolCalledThisTurn(): Boolean = toolCalledThisTurn
+
+  @Synchronized
+  fun getLastSayText(): String = lastSayText
 
   @Synchronized
   @Tool(
     description =
-      "Start a warehouse picking session. Call when the worker says 'start order' followed by an " +
-        "order number. After the tool returns, reply with exactly its sayText, verbatim."
+      "Start a fast warehouse picking session. Call when the worker says 'start order' followed " +
+        "by an order number. After the tool returns, reply with exactly its sayText, verbatim."
   )
   fun startOrder(
     @ToolParam(description = "The spoken order number, digits only.") orderNumber: String
   ): Map<String, Any> {
+    toolCalledThisTurn = true
+    if (phase != Phase.NOT_STARTED) {
+      lastToolTrace = VoicePickingToolTrace("start_order", "order ${orderNumber.digitsOnly()}", accepted = false)
+      return say(lastValidInstruction)
+    }
     val normalized = orderNumber.digitsOnly()
     val matched = MOCK_ORDERS.find { it.orderNumber == normalized }
     if (matched == null) {
@@ -144,33 +112,23 @@ class VoicePickingTools : ToolSet {
       phase = Phase.COMPLETE
       return advance("Order ${spellDigits(matched.orderNumber)} has no remaining picks.")
     }
-    phase = Phase.AWAITING_ARRIVAL
-    return advance(
-      "Order ${spellDigits(matched.orderNumber)} started, ${matched.picks.size} picks. " +
-        "Go to ${pick.locatorSpoken}. Speak when you're there."
-    )
-  }
-
-  @Synchronized
-  @Tool(description = "Confirm the worker has arrived at the current location. Reply with sayText.")
-  fun confirmArrival(): Map<String, Any> {
-    val pick = currentPick ?: return notInSession()
-    if (phase != Phase.AWAITING_ARRIVAL) return say(lastSayText)
     phase = Phase.AWAITING_CHECK_DIGITS
     return advance(
-      "${pick.locatorSpoken.replaceFirstChar { it.uppercase() }}. Read the 3 check digits on the location label."
+      "Order ${spellDigits(matched.orderNumber)} started, ${matched.picks.size} picks. " +
+        "Go to ${pick.locatorSpoken}. Read the 3 check digits on the location label."
     )
   }
 
   @Synchronized
   @Tool(
     description =
-      "Verify the worker is at the right location. Call when the worker says 3 digits on their " +
-        "own, e.g. '4 7 2'. After the tool returns, reply with exactly its sayText, verbatim."
+      "Verify the worker is at the right location. Call when the worker says 3 location check " +
+        "digits. After the tool returns, reply with exactly its sayText, verbatim."
   )
   fun verifyCheckDigits(
     @ToolParam(description = "The 3 spoken check digits, digits only.") checkDigits: String
   ): Map<String, Any> {
+    toolCalledThisTurn = true
     val pick = currentPick ?: return notInSession()
     if (phase != Phase.AWAITING_CHECK_DIGITS) {
       lastToolTrace = VoicePickingToolTrace("verify_check_digits", checkDigits.digitsOnly(), accepted = false)
@@ -197,33 +155,26 @@ class VoicePickingTools : ToolSet {
         expected = pick.checkDigits,
         accepted = true,
       )
-    phase = Phase.AWAITING_ITEM_LOCATION
-    return advance(
-      "Location confirmed. Pick ${pick.quantity} ${pick.itemName}, item ending " +
-        "${spellDigits(pick.itemLast3)}. Speak when you've located the item."
-    )
-  }
-
-  @Synchronized
-  @Tool(description = "Confirm the worker has located the requested item. Reply with sayText.")
-  fun confirmItemLocated(): Map<String, Any> {
-    val pick = currentPick ?: return notInSession()
-    if (phase != Phase.AWAITING_ITEM_LOCATION) return say(lastSayText)
     phase = Phase.AWAITING_PICK_CONFIRM
-    return advance("Confirm item ending ${spellDigits(pick.itemLast3)} and quantity ${pick.quantity}.")
+    val workerItemName = pick.itemName.replace("USB C", "USB-C")
+    return advance(
+      "Location confirmed. Pick ${pick.quantity} $workerItemName, item ending " +
+        "${spellDigits(pick.itemLast3)}."
+    )
   }
 
   @Synchronized
   @Tool(
     description =
-      "Confirm a completed pick. Call when the worker says item digits plus a count, e.g. " +
-        "'9 5 1, picked 3'. After the tool returns, reply with exactly its sayText, verbatim."
+      "Confirm a completed fast pick. Call when the worker says 3 item digits plus the quantity " +
+        "picked. After the tool returns, reply with exactly its sayText, verbatim."
   )
   fun confirmPick(
     @ToolParam(description = "The last 3 digits of the picked item, digits only.")
     itemDigits: String,
     @ToolParam(description = "How many units the worker picked.") quantity: Int,
   ): Map<String, Any> {
+    toolCalledThisTurn = true
     val curOrder = order ?: return notInSession()
     val pick = currentPick ?: return notInSession()
     if (phase != Phase.AWAITING_PICK_CONFIRM) {
@@ -275,9 +226,10 @@ class VoicePickingTools : ToolSet {
           "station ${curOrder.packingStation}. Nice work."
       )
     }
-    phase = Phase.AWAITING_ARRIVAL
+    phase = Phase.AWAITING_CHECK_DIGITS
     return advance(
-      "Pick confirmed. Next, go to ${next.locatorSpoken}. Speak when you're there."
+      "Pick confirmed. Next, go to ${next.locatorSpoken}. " +
+        "Read the 3 check digits on the location label."
     )
   }
 
@@ -287,11 +239,9 @@ class VoicePickingTools : ToolSet {
   @Synchronized
   fun isAwaitingStartOrder(): Boolean = phase == Phase.NOT_STARTED
 
-  /** True when the last check-digit attempt did not advance the warehouse workflow. */
   @Synchronized
   fun isAwaitingCheckDigits(): Boolean = phase == Phase.AWAITING_CHECK_DIGITS
 
-  /** True when the last item/quantity attempt did not advance the warehouse workflow. */
   @Synchronized
   fun isAwaitingPickConfirmation(): Boolean = phase == Phase.AWAITING_PICK_CONFIRM
 
@@ -305,20 +255,12 @@ class VoicePickingTools : ToolSet {
   @Synchronized
   fun getCurrentPickItemName(): String? = currentPick?.itemName
 
-  /**
-   * Replaces the locally cached availability with the latest warehouse snapshot. The caller owns
-   * the warehouse data; this state machine reads the snapshot whenever it chooses the next pick.
-   */
   @Synchronized
   fun syncCancelledWarehouseItems(itemLast3s: Set<String>) {
     cancelledItemLast3.clear()
     cancelledItemLast3.addAll(itemLast3s)
   }
 
-  /**
-   * Applies a warehouse cancellation without involving Gemma. Only cancelling the active pick
-   * interrupts the current voice flow; future picks are skipped when they become next.
-   */
   @Synchronized
   fun cancelWarehouseItem(itemLast3: String): WarehouseCancellationResult {
     val curOrder = order ?: return WarehouseCancellationResult(interruptedActivePick = false)
@@ -336,21 +278,21 @@ class VoicePickingTools : ToolSet {
     val next = currentPick
     if (next == null) {
       phase = Phase.COMPLETE
+      val cancelledItemName = cancelledPick.itemName.replace("USB C", "USB-C")
       val message =
-        "Warehouse update. You no longer need ${cancelledPick.itemName}. " +
+        "Warehouse update. You no longer need $cancelledItemName. " +
           "Order ${spellDigits(curOrder.orderNumber)} is complete. Deliver to packing station " +
           "${curOrder.packingStation}. Nice work."
       advance(message)
       return WarehouseCancellationResult(interruptedActivePick = true, workerMessage = message)
     }
 
-    phase = Phase.AWAITING_ARRIVAL
-    val nextInstruction = "Go to ${next.locatorSpoken}. Speak when you're there."
+    phase = Phase.AWAITING_CHECK_DIGITS
+    val nextInstruction =
+      "Go to ${next.locatorSpoken}. Read the 3 check digits on the location label."
+    val cancelledItemName = cancelledPick.itemName.replace("USB C", "USB-C")
     val message =
-      "Warehouse update. You no longer need ${cancelledPick.itemName}. " +
-        "Next, $nextInstruction"
-    // The update is worker-facing only. Keep the saved model checkpoint at the normal next-pick
-    // instruction so Gemma never receives warehouse-cancellation context on a later audio turn.
+      "Warehouse update. You no longer need $cancelledItemName. Next, $nextInstruction"
     lastValidInstruction = nextInstruction
     say(message)
     return WarehouseCancellationResult(interruptedActivePick = true, workerMessage = message)
@@ -360,9 +302,11 @@ class VoicePickingTools : ToolSet {
   @Tool(
     description =
       "Repeat the current instruction. Call when the worker says 'repeat' or 'say again', or when " +
-        "their utterance doesn't match any other picking tool. After the tool returns, reply with exactly its sayText, verbatim."
+        "their utterance doesn't match another fast picking tool. After the tool returns, reply " +
+        "with exactly its sayText, verbatim."
   )
   fun repeatInstruction(): Map<String, Any> {
+    toolCalledThisTurn = true
     lastToolTrace = VoicePickingToolTrace("repeat_instruction", "repeat", accepted = true)
     return say(lastValidInstruction)
   }
@@ -381,13 +325,19 @@ class VoicePickingTools : ToolSet {
 
   private fun say(text: String): Map<String, Any> {
     lastSayText = text
-    return mapOf(
-      KEY_SAY to text,
-      "status" to "succeeded",
-      "instruction" to
-        "Your entire reply must be EXACTLY the sayText value above, word for word. Do not " +
-          "paraphrase, narrate, or add anything.",
-    )
+    val result =
+      mapOf(
+        KEY_SAY to text,
+        "status" to "succeeded",
+        "instruction" to
+          "Your entire reply must be EXACTLY the sayText value above, word for word. Do not " +
+            "paraphrase, narrate, or add anything.",
+      )
+    if (!toolResultDeliveredThisTurn) {
+      toolResultDeliveredThisTurn = true
+      onToolSayText?.invoke(text)
+    }
+    return result
   }
 
   private fun notInSession(): Map<String, Any> = say(SIGN_ON_PROMPT)

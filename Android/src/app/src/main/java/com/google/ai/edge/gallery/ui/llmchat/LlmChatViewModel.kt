@@ -166,6 +166,14 @@ open class LlmChatViewModelBase(
   }
 
   /**
+   * Ends a model turn immediately after a tool has supplied the app's deterministic response.
+   * Unlike the normal Stop action, this preserves local TTS and does not re-open the microphone.
+   */
+  fun stopInferenceAfterToolCall(model: Model) {
+    model.runtimeHelper.stopResponse(model)
+  }
+
+  /**
    * Re-opens the hands-free microphone if the mode is on. Called when speech for a reply finishes,
    * when a turn ends without speech (errors, Stop), and when the app returns to the foreground.
    */
