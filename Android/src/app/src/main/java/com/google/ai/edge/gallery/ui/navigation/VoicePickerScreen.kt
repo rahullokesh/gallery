@@ -20,6 +20,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -145,6 +146,7 @@ fun VoicePickerScreen(
   var transcript by remember { mutableStateOf(emptyList<VoicePickerTranscriptLine>()) }
   var nextTranscriptId by remember { mutableIntStateOf(0) }
   var lastToolTrace by remember { mutableStateOf<VoicePickingToolTrace?>(null) }
+  var showDebugOutput by remember { mutableStateOf(true) }
   var voiceTurnGeneration by remember { mutableIntStateOf(0) }
   val warehouseItems =
     remember {
@@ -345,7 +347,13 @@ fun VoicePickerScreen(
           )
         }
       }
-      DebugStateCard(state = state, amplitude = amplitude, model = model, toolTrace = lastToolTrace)
+      Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text("Debug output", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+        Switch(checked = showDebugOutput, onCheckedChange = { showDebugOutput = it })
+      }
+      if (showDebugOutput) {
+        DebugStateCard(state = state, amplitude = amplitude, model = model, toolTrace = lastToolTrace)
+      }
       WarehousePanel(
         items = warehouseItems,
         onCancel = { item ->
