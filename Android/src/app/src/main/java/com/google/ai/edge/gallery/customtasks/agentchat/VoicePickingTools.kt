@@ -73,6 +73,12 @@ data class VoicePickingModelCheckpoint(
   val lastValidInstruction: String,
 )
 
+/** Result of a warehouse cancellation requested outside the voice model. */
+data class WarehouseCancellationResult(
+  val interruptedActivePick: Boolean,
+  val workerMessage: String? = null,
+)
+
 /**
  * Tools backing the voice-picking demo skill.
  *
@@ -97,6 +103,7 @@ class VoicePickingTools : ToolSet {
   private var lastSayText = SIGN_ON_PROMPT
   private var lastValidInstruction = SIGN_ON_PROMPT
   private var lastToolTrace: VoicePickingToolTrace? = null
+  private val cancelledItemLast3 = mutableSetOf<String>()
 
   private val currentPick: Pick?
     get() = order?.picks?.getOrNull(pickIndex)
@@ -110,6 +117,7 @@ class VoicePickingTools : ToolSet {
     lastSayText = SIGN_ON_PROMPT
     lastValidInstruction = SIGN_ON_PROMPT
     lastToolTrace = null
+    cancelledItemLast3.clear()
   }
 
   @Synchronized
@@ -130,8 +138,13 @@ class VoicePickingTools : ToolSet {
     lastToolTrace = VoicePickingToolTrace("start_order", "order $normalized", accepted = true)
     order = matched
     pickIndex = 0
+    advanceToNextPendingPick()
+    val pick = currentPick
+    if (pick == null) {
+      phase = Phase.COMPLETE
+      return advance("Order ${spellDigits(matched.orderNumber)} has no remaining picks.")
+    }
     phase = Phase.AWAITING_ARRIVAL
-    val pick = matched.picks[0]
     return advance(
       "Order ${spellDigits(matched.orderNumber)} started, ${matched.picks.size} picks. " +
         "Go to ${pick.locatorSpoken}. Speak when you're there."
@@ -253,6 +266,7 @@ class VoicePickingTools : ToolSet {
         accepted = true,
       )
     pickIndex++
+    advanceToNextPendingPick()
     val next = currentPick
     if (next == null) {
       phase = Phase.COMPLETE
@@ -291,6 +305,57 @@ class VoicePickingTools : ToolSet {
   @Synchronized
   fun getCurrentPickItemName(): String? = currentPick?.itemName
 
+  /**
+   * Replaces the locally cached availability with the latest warehouse snapshot. The caller owns
+   * the warehouse data; this state machine reads the snapshot whenever it chooses the next pick.
+   */
+  @Synchronized
+  fun syncCancelledWarehouseItems(itemLast3s: Set<String>) {
+    cancelledItemLast3.clear()
+    cancelledItemLast3.addAll(itemLast3s)
+  }
+
+  /**
+   * Applies a warehouse cancellation without involving Gemma. Only cancelling the active pick
+   * interrupts the current voice flow; future picks are skipped when they become next.
+   */
+  @Synchronized
+  fun cancelWarehouseItem(itemLast3: String): WarehouseCancellationResult {
+    val curOrder = order ?: return WarehouseCancellationResult(interruptedActivePick = false)
+    val cancelledPick = curOrder.picks.find { it.itemLast3 == itemLast3 }
+      ?: return WarehouseCancellationResult(interruptedActivePick = false)
+    if (!cancelledItemLast3.add(itemLast3)) {
+      return WarehouseCancellationResult(interruptedActivePick = false)
+    }
+
+    val isActivePick = currentPick?.itemLast3 == itemLast3 && phase != Phase.COMPLETE
+    if (!isActivePick) return WarehouseCancellationResult(interruptedActivePick = false)
+
+    pickIndex++
+    advanceToNextPendingPick()
+    val next = currentPick
+    if (next == null) {
+      phase = Phase.COMPLETE
+      val message =
+        "Warehouse update. You no longer need ${cancelledPick.itemName}. " +
+          "Order ${spellDigits(curOrder.orderNumber)} is complete. Deliver to packing station " +
+          "${curOrder.packingStation}. Nice work."
+      advance(message)
+      return WarehouseCancellationResult(interruptedActivePick = true, workerMessage = message)
+    }
+
+    phase = Phase.AWAITING_ARRIVAL
+    val nextInstruction = "Go to ${next.locatorSpoken}. Speak when you're there."
+    val message =
+      "Warehouse update. You no longer need ${cancelledPick.itemName}. " +
+        "Next, $nextInstruction"
+    // The update is worker-facing only. Keep the saved model checkpoint at the normal next-pick
+    // instruction so Gemma never receives warehouse-cancellation context on a later audio turn.
+    lastValidInstruction = nextInstruction
+    say(message)
+    return WarehouseCancellationResult(interruptedActivePick = true, workerMessage = message)
+  }
+
   @Synchronized
   @Tool(
     description =
@@ -305,6 +370,13 @@ class VoicePickingTools : ToolSet {
   private fun advance(text: String): Map<String, Any> {
     lastValidInstruction = text
     return say(text)
+  }
+
+  private fun advanceToNextPendingPick() {
+    val picks = order?.picks ?: return
+    while (pickIndex < picks.size && picks[pickIndex].itemLast3 in cancelledItemLast3) {
+      pickIndex++
+    }
   }
 
   private fun say(text: String): Map<String, Any> {

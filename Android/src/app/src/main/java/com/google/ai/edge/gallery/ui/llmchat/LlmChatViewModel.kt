@@ -157,6 +157,14 @@ open class LlmChatViewModelBase(
     }
   }
 
+  /** Stops a live voice turn without reopening the microphone; used for external warehouse updates. */
+  fun interruptForWarehouseUpdate(model: Model) {
+    ttsHelper?.stop()
+    model.runtimeHelper.stopResponse(model)
+    setInProgress(false)
+    setPreparing(false)
+  }
+
   /**
    * Re-opens the hands-free microphone if the mode is on. Called when speech for a reply finishes,
    * when a turn ends without speech (errors, Stop), and when the app returns to the foreground.

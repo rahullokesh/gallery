@@ -17,9 +17,11 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -27,6 +29,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -67,10 +70,25 @@ private data class VoicePickerTranscriptLine(
   val content: String,
 )
 
+private enum class WarehouseItemStatus {
+  AVAILABLE,
+  CANCELLED,
+}
+
+private data class WarehouseItem(
+  val id: String,
+  val name: String,
+  val aisle: String,
+  val itemEnding: String,
+  val quantity: Int,
+  val status: WarehouseItemStatus = WarehouseItemStatus.AVAILABLE,
+)
+
 private enum class VoicePickerState(val label: String) {
   PREPARING("Preparing on-device model"),
   WAITING_FOR_START("Ready — say \"Start Order 42\" to start order"),
   SPEAKING_START_ORDER_ERROR("Gemma is explaining the order-start problem"),
+  SPEAKING_WAREHOUSE_UPDATE("Speaking warehouse update"),
   SENDING_TO_GEMMA("Sending audio to Gemma"),
   GEMMA_RESPONDING("Gemma is responding"),
   SPEAKING_NAVIGATION("Gemma is speaking the next location"),
@@ -127,6 +145,15 @@ fun VoicePickerScreen(
   var transcript by remember { mutableStateOf(emptyList<VoicePickerTranscriptLine>()) }
   var nextTranscriptId by remember { mutableIntStateOf(0) }
   var lastToolTrace by remember { mutableStateOf<VoicePickingToolTrace?>(null) }
+  var voiceTurnGeneration by remember { mutableIntStateOf(0) }
+  val warehouseItems =
+    remember {
+      mutableStateListOf(
+        WarehouseItem("951", "USB-C cables", "12", "951", 3),
+        WarehouseItem("208", "Wireless headphones", "7", "208", 1),
+        WarehouseItem("664", "Phone cases", "3", "664", 5),
+      )
+    }
 
   fun addTranscriptLine(speaker: String, content: String): Int {
     val id = nextTranscriptId++
@@ -174,6 +201,7 @@ fun VoicePickerScreen(
       state =
         when (state) {
           VoicePickerState.SPEAKING_START_ORDER_ERROR -> VoicePickerState.WAITING_FOR_START
+          VoicePickerState.SPEAKING_WAREHOUSE_UPDATE -> VoicePickerState.WAITING_FOR_ARRIVAL
           VoicePickerState.SPEAKING_NAVIGATION -> VoicePickerState.WAITING_FOR_ARRIVAL
           VoicePickerState.LOCAL_LOCATION_PROMPT -> VoicePickerState.LISTENING_FOR_CHECK_DIGITS
           VoicePickerState.SPEAKING_WRONG_CHECK_DIGITS ->
@@ -208,6 +236,10 @@ fun VoicePickerScreen(
       state = VoicePickerState.ERROR
       return
     }
+    selectedTask.voicePickingTools.syncCancelledWarehouseItems(
+      warehouseItems.filter { it.status == WarehouseItemStatus.CANCELLED }.map { it.itemEnding }.toSet()
+    )
+    val turnGeneration = voiceTurnGeneration
     val checkpoint = selectedTask.voicePickingTools.getModelCheckpoint()
     val routingContext = routingContextFor(checkpoint)
     state = VoicePickerState.SENDING_TO_GEMMA
@@ -218,14 +250,18 @@ fun VoicePickerScreen(
         model = selectedModel,
         input = routingContext,
         audioMessages = listOf(ChatMessageAudioClip(audioData, VOICE_PICKER_SAMPLE_RATE, ChatSide.USER)),
-        onFirstToken = { state = VoicePickerState.GEMMA_RESPONDING },
+        onFirstToken = {
+          if (turnGeneration == voiceTurnGeneration) state = VoicePickerState.GEMMA_RESPONDING
+        },
         onResponseDelta = { delta ->
+          if (turnGeneration != voiceTurnGeneration) return@generateResponse
           transcript =
             transcript.map { line ->
               if (line.id == agentLineId) line.copy(content = line.content + delta) else line
             }
         },
         onDone = {
+          if (turnGeneration != voiceTurnGeneration) return@generateResponse
           lastToolTrace = selectedTask.voicePickingTools.getLastToolTrace()
           val shouldEnterRecovery = recoveryState != null && shouldRecover()
           state =
@@ -235,7 +271,9 @@ fun VoicePickerScreen(
               else -> nextState
             }
         },
-        onError = { state = VoicePickerState.ERROR },
+        onError = {
+          if (turnGeneration == voiceTurnGeneration) state = VoicePickerState.ERROR
+        },
       )
     }
     // Rebuild a tiny, deterministic conversation for every model turn. The checkpoint advances
@@ -267,6 +305,20 @@ fun VoicePickerScreen(
     viewModel.speakLocalPrompt(workerPrompt)
   }
 
+  fun handleWarehouseCancellation(item: WarehouseItem) {
+    val result = voicePickerTask?.voicePickingTools?.cancelWarehouseItem(item.itemEnding) ?: return
+    if (!result.interruptedActivePick) return
+
+    voiceTurnGeneration++
+    showRecorder = false
+    model?.let { viewModel.interruptForWarehouseUpdate(it) }
+    val message = result.workerMessage ?: return
+    val orderComplete = voicePickerTask.voicePickingTools.isComplete()
+    state = if (orderComplete) VoicePickerState.COMPLETE else VoicePickerState.SPEAKING_WAREHOUSE_UPDATE
+    addTranscriptLine("Agent", message)
+    viewModel.speakLocalPrompt(message)
+  }
+
   Scaffold(
     topBar = {
       GalleryTopAppBar(
@@ -294,7 +346,14 @@ fun VoicePickerScreen(
         }
       }
       DebugStateCard(state = state, amplitude = amplitude, model = model, toolTrace = lastToolTrace)
-      ConversationTranscriptCard(transcript)
+      WarehousePanel(
+        items = warehouseItems,
+        onCancel = { item ->
+          val index = warehouseItems.indexOfFirst { it.id == item.id }
+          if (index >= 0) warehouseItems[index] = item.copy(status = WarehouseItemStatus.CANCELLED)
+          handleWarehouseCancellation(item)
+        },
+      )
       if (showRecorder && voiceTask != null) {
         key(recorderGeneration) {
           AudioRecorderPanel(
@@ -351,6 +410,35 @@ fun VoicePickerScreen(
             silenceStopMs = VOICE_PICKER_SILENCE_MS,
             speechAmplitudeThreshold = VOICE_PICKER_SPEECH_THRESHOLD,
           )
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun WarehousePanel(items: List<WarehouseItem>, onCancel: (WarehouseItem) -> Unit) {
+  Card(modifier = Modifier.fillMaxWidth()) {
+    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+      Text("Warehouse (Admin View)", style = MaterialTheme.typography.titleMedium)
+      if (items.isEmpty()) {
+        Text("No items in warehouse")
+      } else {
+        items.forEachIndexed { index, item ->
+          if (index > 0) HorizontalDivider()
+          Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+              text =
+                "aisle ${item.aisle}  |  ${item.name}  |  ending ${item.itemEnding}  |  qty ${item.quantity}",
+              modifier = Modifier.fillMaxWidth(0.86f),
+              style = MaterialTheme.typography.bodyMedium,
+            )
+            if (item.status == WarehouseItemStatus.CANCELLED) {
+              Text("CANCELLED", style = MaterialTheme.typography.labelSmall)
+            } else {
+              TextButton(onClick = { onCancel(item) }) { Text("×") }
+            }
+          }
         }
       }
     }
