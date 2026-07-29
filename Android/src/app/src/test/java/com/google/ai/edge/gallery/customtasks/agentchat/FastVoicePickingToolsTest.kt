@@ -13,24 +13,26 @@ class FastVoicePickingToolsTest {
 
     val result = tools.startOrder("42")
 
-    assertContains(result, "Order 4 2 started, 3 picks")
-    assertContains(result, "Go to aisle 12, bay 3, shelf 2")
-    assertContains(result, "Read the 3 check digits")
+    assertContains(result, "Job 4 2 started, 3 moves")
+    assertContains(result, "Proceed to bay 12, rack position 3, level 2")
+    assertContains(result, "read the 3 check digits")
     assertEquals("AWAITING_CHECK_DIGITS", tools.getModelCheckpoint().phase)
     assertTrue(tools.isAwaitingCheckDigits())
   }
 
   @Test
-  fun validCheckDigits_skipItemLocationAndImmediatelyBeginPickConfirmation() {
+  fun validCheckDigits_requestTagDigitsWhenTheLoadIsSecure() {
     val tools = FastVoicePickingTools()
     tools.startOrder("42")
 
     val result = tools.verifyCheckDigits("472")
 
-    assertContains(result, "Location confirmed")
-    assertContains(result, "Pick 3 USB-C cables, item ending 9 5 1")
-    assertEquals("AWAITING_PICK_CONFIRM", tools.getModelCheckpoint().phase)
-    assertTrue(tools.isAwaitingPickConfirmation())
+    assertContains(result, "Pickup location confirmed")
+    assertContains(result, "power generator load, tag ending 9 5 1")
+    assertContains(result, "When the load is secure, read the last 3 digits")
+    assertFalse((result["sayText"] as String).contains("quantity", ignoreCase = true))
+    assertEquals("AWAITING_TAG_CONFIRMATION", tools.getModelCheckpoint().phase)
+    assertTrue(tools.isAwaitingTagConfirmation())
   }
 
   @Test
@@ -44,46 +46,43 @@ class FastVoicePickingToolsTest {
     assertTrue(tools.isAwaitingCheckDigits())
 
     tools.verifyCheckDigits("472")
-    val pickCheckpoint = tools.getModelCheckpoint().lastValidInstruction
+    val tagCheckpoint = tools.getModelCheckpoint().lastValidInstruction
+    assertFalse(tagCheckpoint.contains("951"))
 
-    assertContains(tools.confirmPick("950", 3), "Wrong item")
-    assertEquals(pickCheckpoint, tools.getModelCheckpoint().lastValidInstruction)
-    assertTrue(tools.isAwaitingPickConfirmation())
-
-    assertContains(tools.confirmPick("951", 2), "Quantity should be 3")
-    assertEquals(pickCheckpoint, tools.getModelCheckpoint().lastValidInstruction)
-    assertTrue(tools.isAwaitingPickConfirmation())
+    assertContains(tools.confirmPick("950"), "Wrong load tag")
+    assertEquals(tagCheckpoint, tools.getModelCheckpoint().lastValidInstruction)
+    assertTrue(tools.isAwaitingTagConfirmation())
   }
 
   @Test
-  fun confirmedPick_immediatelyRequestsTheNextLocationsCheckDigits() {
+  fun correctTagDigits_immediatelyRequestTheNextLocationsCheckDigits() {
     val tools = FastVoicePickingTools()
     tools.startOrder("42")
     tools.verifyCheckDigits("472")
 
-    val result = tools.confirmPick("951", 3)
+    val result = tools.confirmPick("951")
 
-    assertContains(result, "Next, go to aisle 7, bay 1, shelf 4")
-    assertContains(result, "Read the 3 check digits")
+    assertContains(result, "Next, proceed to bay 7, rack position 1, level 4")
+    assertContains(result, "read the 3 check digits")
     assertEquals("AWAITING_CHECK_DIGITS", tools.getModelCheckpoint().phase)
     assertFalse(tools.isComplete())
   }
 
   @Test
-  fun order42_completesThroughTheCondensedThreeTurnPerPickFlow() {
+  fun order42_completesThroughLocationAndTagDigits() {
     val tools = FastVoicePickingTools()
 
     tools.startOrder("42")
     tools.verifyCheckDigits("472")
-    tools.confirmPick("951", 3)
+    tools.confirmPick("951")
 
     tools.verifyCheckDigits("815")
-    tools.confirmPick("208", 1)
+    tools.confirmPick("208")
 
     tools.verifyCheckDigits("339")
-    val result = tools.confirmPick("664", 5)
+    val result = tools.confirmPick("664")
 
-    assertContains(result, "Order 4 2 complete")
+    assertContains(result, "Job 4 2 complete")
     assertTrue(tools.isComplete())
   }
 
@@ -95,8 +94,8 @@ class FastVoicePickingToolsTest {
     val result = tools.cancelWarehouseItem("951")
 
     assertTrue(result.interruptedActivePick)
-    assertContains(requireNotNull(result.workerMessage), "aisle 7, bay 1, shelf 4")
-    assertContains(requireNotNull(result.workerMessage), "Read the 3 check digits")
+    assertContains(requireNotNull(result.workerMessage), "bay 7, rack position 1, level 4")
+    assertContains(requireNotNull(result.workerMessage), "read the 3 check digits")
     assertEquals("AWAITING_CHECK_DIGITS", tools.getModelCheckpoint().phase)
     assertFalse(tools.getModelCheckpoint().lastValidInstruction.contains("Warehouse update"))
   }
@@ -111,8 +110,8 @@ class FastVoicePickingToolsTest {
 
     tools.startOrder("42")
     assertTrue(tools.wasToolCalledThisTurn())
-    assertContains(tools.getLastSayText(), "Order 4 2 started")
-    assertContains(requireNotNull(spokenResult), "Order 4 2 started")
+    assertContains(tools.getLastSayText(), "Job 4 2 started")
+    assertContains(requireNotNull(spokenResult), "Job 4 2 started")
 
     tools.beginModelTurn()
     assertFalse(tools.wasToolCalledThisTurn())

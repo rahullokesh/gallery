@@ -54,7 +54,7 @@ import kotlinx.coroutines.launch
 
 private const val TAG = "AGLlmChatViewModel"
 private const val VOICE_ACTIVATION_PROMPT =
-  "Voice picking is ready. Say start order, followed by the order number. For example: start order 4 2."
+  "Forklift pickup is ready. Say start job, followed by the job number. For example: start job 4 2."
 
 @OptIn(ExperimentalApi::class)
 open class LlmChatViewModelBase(

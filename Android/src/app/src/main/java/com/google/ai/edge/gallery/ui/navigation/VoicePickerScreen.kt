@@ -81,54 +81,53 @@ private enum class WarehouseItemStatus {
 private data class WarehouseItem(
   val id: String,
   val name: String,
-  val aisle: String,
-  val itemEnding: String,
-  val quantity: Int,
+  val bay: String,
+  val rackPosition: String,
+  val level: String,
+  val loadTagEnding: String,
   val status: WarehouseItemStatus = WarehouseItemStatus.AVAILABLE,
 )
 
 private enum class VoicePickerState(val label: String) {
   SELECTING_MODE("Choose Regular or Fast"),
   PREPARING("Preparing on-device model"),
-  WAITING_FOR_START("Ready — say \"Start Order 42\" to start order"),
-  SPEAKING_START_ORDER_ERROR("Gemma is explaining the order-start problem"),
+  WAITING_FOR_START("Ready — say \"Start Job 42\" to start job"),
+  SPEAKING_START_ORDER_ERROR("Gemma is explaining the job-start problem"),
   SPEAKING_WAREHOUSE_UPDATE("Speaking warehouse update"),
   SENDING_TO_GEMMA("Sending audio to Gemma"),
   GEMMA_RESPONDING("Gemma is responding"),
-  SPEAKING_NAVIGATION("Gemma is speaking the next location"),
-  WAITING_FOR_ARRIVAL("Waiting for arrival signal"),
+  SPEAKING_NAVIGATION("Gemma is speaking the next pickup location"),
+  WAITING_FOR_ARRIVAL("Waiting for safe-stop signal"),
   LOCAL_LOCATION_PROMPT("Sound detected — prompting for check digits"),
   LISTENING_FOR_CHECK_DIGITS("Listening for location check digits"),
   SPEAKING_WRONG_CHECK_DIGITS("Gemma is explaining the check-digit mismatch"),
-  SPEAKING_ITEM_TASK("Gemma is speaking the item to pick"),
-  WAITING_FOR_ITEM_LOCATION("Waiting for item-located signal"),
-  LOCAL_PICK_PROMPT("Sound detected — prompting for item and quantity"),
-  LISTENING_FOR_PICK_CONFIRMATION("Listening for item and quantity"),
-  SPEAKING_WRONG_PICK_CONFIRMATION("Gemma is explaining the item or quantity mismatch"),
-  FAST_SPEAKING_LOCATION("Fast: Gemma is speaking the location and check-digit request"),
+  SPEAKING_ITEM_TASK("Gemma is speaking the equipment load"),
+  WAITING_FOR_LOAD_SECURED("Waiting for load-secured signal"),
+  LOCAL_TAG_PROMPT("Sound detected — prompting for load-tag digits"),
+  LISTENING_FOR_TAG_DIGITS("Listening for load-tag digits"),
+  SPEAKING_WRONG_TAG_DIGITS("Gemma is explaining the load-tag mismatch"),
+  FAST_SPEAKING_LOCATION("Fast: Speaking the location and check-digit request"),
   FAST_LISTENING_FOR_CHECK_DIGITS("Fast: Listening for location check digits"),
-  FAST_SPEAKING_WRONG_CHECK_DIGITS("Fast: Gemma is explaining the check-digit mismatch"),
-  FAST_SPEAKING_ITEM_TASK("Fast: Gemma is speaking the item to pick"),
-  FAST_LISTENING_FOR_PICK_CONFIRMATION("Fast: Listening for item and quantity"),
-  FAST_SPEAKING_WRONG_PICK_CONFIRMATION(
-    "Fast: Gemma is explaining the item or quantity mismatch"
-  ),
-  COMPLETE("Order complete"),
-  ERROR("Unable to start Voice Picker"),
+  FAST_SPEAKING_WRONG_CHECK_DIGITS("Fast: Speaking the check-digit mismatch"),
+  FAST_SPEAKING_ITEM_TASK("Fast: Speaking the equipment load"),
+  FAST_LISTENING_FOR_TAG_DIGITS("Fast: Listening for load-tag digits"),
+  FAST_SPEAKING_WRONG_TAG_DIGITS("Fast: Speaking the load-tag mismatch"),
+  COMPLETE("Job complete"),
+  ERROR("Unable to start Forklift Assistant"),
 }
 
 private fun routingContextFor(checkpoint: VoicePickingModelCheckpoint): String =
   """
-  Routing context (do not say this aloud): the worker is responding to this exact valid checkpoint.
+  Routing context (do not say this aloud): the operator is responding to this exact valid checkpoint.
   State: ${checkpoint.phase}
   Last valid system instruction: ${checkpoint.lastValidInstruction}
-  Treat this as the worker's first response to that instruction. Extract values only from the new
+  Treat this as the operator's first response to that instruction. Extract values only from the new
   audio clip. Do not infer values from the instruction. Do not mention this routing context.
   """.trimIndent()
 
 /**
  * A compact replayable checkpoint used only after Kotlin rejects a response. It preserves the
- * worker's place in the flow without exposing target digits or retaining the rejected turn.
+ * operator's place in the flow without exposing target digits or retaining the rejected turn.
  */
 private fun cleanCheckpointFor(checkpoint: VoicePickingModelCheckpoint): List<Message> =
   listOf(Message.model(checkpoint.lastValidInstruction))
@@ -170,9 +169,9 @@ fun VoicePickerScreen(
   val warehouseItems =
     remember {
       mutableStateListOf(
-        WarehouseItem("951", "USB-C cables", "12", "951", 3),
-        WarehouseItem("208", "Wireless headphones", "7", "208", 1),
-        WarehouseItem("664", "Phone cases", "3", "664", 5),
+        WarehouseItem("951", "Power generator", "12", "3", "2", "951"),
+        WarehouseItem("208", "Air compressor", "7", "1", "4", "208"),
+        WarehouseItem("664", "Water pump", "3", "6", "1", "664"),
       )
     }
 
@@ -210,18 +209,18 @@ fun VoicePickerScreen(
         VoicePickerState.LOCAL_LOCATION_PROMPT -> VoicePickerState.LISTENING_FOR_CHECK_DIGITS
         VoicePickerState.SPEAKING_WRONG_CHECK_DIGITS ->
           VoicePickerState.LISTENING_FOR_CHECK_DIGITS
-        VoicePickerState.SPEAKING_ITEM_TASK -> VoicePickerState.WAITING_FOR_ITEM_LOCATION
-        VoicePickerState.LOCAL_PICK_PROMPT -> VoicePickerState.LISTENING_FOR_PICK_CONFIRMATION
-        VoicePickerState.SPEAKING_WRONG_PICK_CONFIRMATION ->
-          VoicePickerState.LISTENING_FOR_PICK_CONFIRMATION
+        VoicePickerState.SPEAKING_ITEM_TASK -> VoicePickerState.WAITING_FOR_LOAD_SECURED
+        VoicePickerState.LOCAL_TAG_PROMPT -> VoicePickerState.LISTENING_FOR_TAG_DIGITS
+        VoicePickerState.SPEAKING_WRONG_TAG_DIGITS ->
+          VoicePickerState.LISTENING_FOR_TAG_DIGITS
         VoicePickerState.FAST_SPEAKING_LOCATION ->
           VoicePickerState.FAST_LISTENING_FOR_CHECK_DIGITS
         VoicePickerState.FAST_SPEAKING_WRONG_CHECK_DIGITS ->
           VoicePickerState.FAST_LISTENING_FOR_CHECK_DIGITS
         VoicePickerState.FAST_SPEAKING_ITEM_TASK ->
-          VoicePickerState.FAST_LISTENING_FOR_PICK_CONFIRMATION
-        VoicePickerState.FAST_SPEAKING_WRONG_PICK_CONFIRMATION ->
-          VoicePickerState.FAST_LISTENING_FOR_PICK_CONFIRMATION
+          VoicePickerState.FAST_LISTENING_FOR_TAG_DIGITS
+        VoicePickerState.FAST_SPEAKING_WRONG_TAG_DIGITS ->
+          VoicePickerState.FAST_LISTENING_FOR_TAG_DIGITS
         else -> state
       }
     beginListening()
@@ -305,7 +304,10 @@ fun VoicePickerScreen(
     }
     selectedTask.syncCancelledWarehouseItems(
       mode,
-      warehouseItems.filter { it.status == WarehouseItemStatus.CANCELLED }.map { it.itemEnding }.toSet()
+      warehouseItems
+        .filter { it.status == WarehouseItemStatus.CANCELLED }
+        .map { it.loadTagEnding }
+        .toSet()
     )
     val turnGeneration = voiceTurnGeneration
     val checkpoint = selectedTask.getModelCheckpoint(mode)
@@ -324,7 +326,7 @@ fun VoicePickerScreen(
     }
 
     state = VoicePickerState.SENDING_TO_GEMMA
-    addTranscriptLine("Worker audio", "Sent to Gemma")
+    addTranscriptLine("Operator audio", "Sent to Gemma")
     val agentLineId = addTranscriptLine("Agent", "")
     if (isFastMode) {
       fastModelResponseFinished = false
@@ -421,27 +423,16 @@ fun VoicePickerScreen(
   fun speakLocalPrompt(
     prompt: String,
     speakingState: VoicePickerState,
-    appendCurrentItemName: Boolean = false,
   ) {
-    val workerPrompt =
-      if (appendCurrentItemName) {
-        val mode = selectedMode
-        val itemName =
-          if (mode == null) null else voicePickerTask?.getCurrentPickItemName(mode)
-        val workerItemName = itemName?.replace("USB C", "USB-C")
-        if (workerItemName != null) "${prompt.removeSuffix(".")} for $workerItemName." else prompt
-      } else {
-        prompt
-      }
     state = speakingState
-    addTranscriptLine("Agent", workerPrompt)
-    viewModel.speakLocalPrompt(workerPrompt)
+    addTranscriptLine("Agent", prompt)
+    viewModel.speakLocalPrompt(prompt)
   }
 
   fun handleWarehouseCancellation(item: WarehouseItem) {
     val mode = selectedMode ?: return
     val selectedTask = voicePickerTask ?: return
-    val result = selectedTask.cancelWarehouseItem(mode, item.itemEnding)
+    val result = selectedTask.cancelWarehouseItem(mode, item.loadTagEnding)
     if (!result.interruptedActivePick) return
 
     voiceTurnGeneration++
@@ -464,7 +455,7 @@ fun VoicePickerScreen(
   Scaffold(
     topBar = {
       GalleryTopAppBar(
-        title = "Voice Picker",
+        title = "Forklift Assistant",
         leftAction = AppBarAction(AppBarActionType.NAVIGATE_UP, onNavigateUp),
       )
     }
@@ -473,7 +464,7 @@ fun VoicePickerScreen(
       modifier = Modifier.fillMaxSize().padding(16.dp).padding(innerPadding),
       verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-      Text("Voice Picker", style = MaterialTheme.typography.headlineMedium)
+      Text("Forklift Assistant", style = MaterialTheme.typography.headlineMedium)
       if (selectedMode == null) {
         Text("Choose a mode", style = MaterialTheme.typography.titleMedium)
         Row(
@@ -508,7 +499,7 @@ fun VoicePickerScreen(
           colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
         ) {
           Text(
-            text = "Say \"Start Order 42\" to start order",
+            text = "Say \"Start Job 42\" to start job",
             modifier = Modifier.padding(16.dp),
             style = MaterialTheme.typography.titleMedium,
             color = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -525,7 +516,7 @@ fun VoicePickerScreen(
         DebugStateCard(state = state, amplitude = amplitude, model = model, toolTrace = lastToolTrace)
       }
       if (selectedMode != null) {
-        WarehousePanel(
+        WarehouseLoadsPanel(
           items = warehouseItems,
           onCancel = { item ->
             val index = warehouseItems.indexOfFirst { it.id == item.id }
@@ -572,23 +563,22 @@ fun VoicePickerScreen(
                       voicePickerTask?.isAwaitingCheckDigits(VoicePickerMode.REGULAR) == true
                     },
                   )
-                VoicePickerState.WAITING_FOR_ITEM_LOCATION -> {
+                VoicePickerState.WAITING_FOR_LOAD_SECURED -> {
                   val prompt = voicePickerTask?.voicePickingTools?.confirmItemLocated()?.get("sayText") as? String
                   if (prompt != null) {
                     speakLocalPrompt(
                       prompt = prompt,
-                      speakingState = VoicePickerState.LOCAL_PICK_PROMPT,
-                      appendCurrentItemName = true,
+                      speakingState = VoicePickerState.LOCAL_TAG_PROMPT,
                     )
                   }
                 }
-                VoicePickerState.LISTENING_FOR_PICK_CONFIRMATION ->
+                VoicePickerState.LISTENING_FOR_TAG_DIGITS ->
                   sendAudio(
                     audioData = audioData,
                     nextState = VoicePickerState.SPEAKING_NAVIGATION,
-                    recoveryState = VoicePickerState.SPEAKING_WRONG_PICK_CONFIRMATION,
+                    recoveryState = VoicePickerState.SPEAKING_WRONG_TAG_DIGITS,
                     shouldRecover = {
-                      voicePickerTask?.isAwaitingPickConfirmation(VoicePickerMode.REGULAR) == true
+                      voicePickerTask?.isAwaitingTagConfirmation(VoicePickerMode.REGULAR) == true
                     },
                   )
                 VoicePickerState.FAST_LISTENING_FOR_CHECK_DIGITS ->
@@ -600,13 +590,13 @@ fun VoicePickerScreen(
                       voicePickerTask?.isAwaitingCheckDigits(VoicePickerMode.FAST) == true
                     },
                   )
-                VoicePickerState.FAST_LISTENING_FOR_PICK_CONFIRMATION ->
+                VoicePickerState.FAST_LISTENING_FOR_TAG_DIGITS ->
                   sendAudio(
                     audioData = audioData,
                     nextState = VoicePickerState.FAST_SPEAKING_LOCATION,
-                    recoveryState = VoicePickerState.FAST_SPEAKING_WRONG_PICK_CONFIRMATION,
+                    recoveryState = VoicePickerState.FAST_SPEAKING_WRONG_TAG_DIGITS,
                     shouldRecover = {
-                      voicePickerTask?.isAwaitingPickConfirmation(VoicePickerMode.FAST) == true
+                      voicePickerTask?.isAwaitingTagConfirmation(VoicePickerMode.FAST) == true
                     },
                   )
                 else -> Unit
@@ -625,22 +615,26 @@ fun VoicePickerScreen(
 }
 
 @Composable
-private fun WarehousePanel(items: List<WarehouseItem>, onCancel: (WarehouseItem) -> Unit) {
+private fun WarehouseLoadsPanel(items: List<WarehouseItem>, onCancel: (WarehouseItem) -> Unit) {
   Card(modifier = Modifier.fillMaxWidth()) {
     Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-      Text("Warehouse (Admin View)", style = MaterialTheme.typography.titleMedium)
+      Text("Warehouse Loads (Admin View)", style = MaterialTheme.typography.titleMedium)
       if (items.isEmpty()) {
-        Text("No items in warehouse")
+        Text("No equipment loads in warehouse")
       } else {
         items.forEachIndexed { index, item ->
           if (index > 0) HorizontalDivider()
           Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(
-              text =
-                "aisle ${item.aisle}  |  ${item.name}  |  ending ${item.itemEnding}  |  qty ${item.quantity}",
-              modifier = Modifier.fillMaxWidth(0.86f),
-              style = MaterialTheme.typography.bodyMedium,
-            )
+            Column(modifier = Modifier.weight(1f).padding(vertical = 8.dp)) {
+              Text(
+                "Bay ${item.bay}  |  Rack ${item.rackPosition}  |  Level ${item.level}",
+                style = MaterialTheme.typography.bodyMedium,
+              )
+              Text(
+                "${item.name}  |  Tag ${item.loadTagEnding}",
+                style = MaterialTheme.typography.bodyMedium,
+              )
+            }
             if (item.status == WarehouseItemStatus.CANCELLED) {
               Text("CANCELLED", style = MaterialTheme.typography.labelSmall)
             } else {

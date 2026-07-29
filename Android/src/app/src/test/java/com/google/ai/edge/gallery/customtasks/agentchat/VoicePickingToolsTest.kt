@@ -11,14 +11,18 @@ class VoicePickingToolsTest {
   fun wrongCheckDigits_stayAtTheSameLocationUntilTheCorrectDigitsArrive() {
     val tools = VoicePickingTools()
 
-    assertContains(tools.startOrder("42"), "aisle 12, bay 3, shelf 2")
+    assertContains(tools.startOrder("42"), "bay 12, rack position 3, level 2")
     assertContains(tools.confirmArrival(), "Read the 3 check digits")
 
     assertContains(tools.verifyCheckDigits("123"), "Wrong check digits")
     assertTrue(tools.isAwaitingCheckDigits())
     assertTrace(tools, interpreted = "123", expected = "472", accepted = false)
 
-    assertContains(tools.verifyCheckDigits("472"), "Location confirmed")
+    val pickupInstruction = tools.verifyCheckDigits("472")
+    assertContains(pickupInstruction, "Pickup location confirmed")
+    assertContains(pickupInstruction, "power generator load, tag ending 9 5 1")
+    assertContains(pickupInstruction, "Speak when the load is secure")
+    assertFalse((pickupInstruction["sayText"] as String).contains("quantity", ignoreCase = true))
     assertFalse(tools.isAwaitingCheckDigits())
     assertTrace(tools, interpreted = "472", expected = "472", accepted = true)
   }
@@ -28,48 +32,48 @@ class VoicePickingToolsTest {
     val tools = VoicePickingTools()
     startAndConfirmFirstPick(tools)
 
-    assertContains(tools.confirmArrival(), "Aisle 7, bay 1, shelf 4")
+    assertContains(tools.confirmArrival(), "Bay 7, rack position 1, level 4")
     assertContains(tools.verifyCheckDigits("234"), "Wrong check digits")
     assertTrue(tools.isAwaitingCheckDigits())
     assertTrace(tools, interpreted = "234", expected = "815", accepted = false)
 
-    assertContains(tools.verifyCheckDigits("815"), "Location confirmed")
+    assertContains(tools.verifyCheckDigits("815"), "Pickup location confirmed")
     assertFalse(tools.isAwaitingCheckDigits())
     assertTrace(tools, interpreted = "815", expected = "815", accepted = true)
   }
 
   @Test
-  fun wrongItemOrQuantity_staysOnThePickConfirmationStep() {
+  fun loadSecuredSignal_requestsTagDigitsAndCorrectTagAdvances() {
     val tools = VoicePickingTools()
     tools.startOrder("42")
     tools.confirmArrival()
     tools.verifyCheckDigits("472")
-    tools.confirmItemLocated()
 
-    assertContains(tools.confirmPick("950", 3), "Wrong item")
-    assertTrue(tools.isAwaitingPickConfirmation())
-    assertTrace(tools, interpreted = "950, quantity 3", expected = "951, quantity 3", accepted = false)
+    val prompt = tools.confirmItemLocated()
+    assertContains(prompt, "Read the last 3 digits on the load tag")
+    assertEquals("AWAITING_TAG_CONFIRMATION", tools.getModelCheckpoint().phase)
 
-    assertContains(tools.confirmPick("951", 2), "Quantity should be 3")
-    assertTrue(tools.isAwaitingPickConfirmation())
-    assertTrace(tools, interpreted = "951, quantity 2", expected = "951, quantity 3", accepted = false)
+    assertContains(tools.confirmPick("950"), "Wrong load tag")
+    assertTrue(tools.isAwaitingTagConfirmation())
+    assertTrace(tools, interpreted = "950", expected = "951", accepted = false)
 
-    assertContains(tools.confirmPick("951", 3), "Next, go to aisle 7")
-    assertFalse(tools.isAwaitingPickConfirmation())
-    assertTrace(tools, interpreted = "951, quantity 3", expected = "951, quantity 3", accepted = true)
+    val result = tools.confirmPick("951")
+    assertContains(result, "Pickup confirmed. Next, proceed to bay 7")
+    assertEquals("AWAITING_ARRIVAL", tools.getModelCheckpoint().phase)
+    assertTrace(tools, interpreted = "951", expected = "951", accepted = true)
   }
 
   @Test
   fun outOfOrderCalls_doNotAdvanceTheWorkflow() {
     val tools = VoicePickingTools()
 
-    assertContains(tools.verifyCheckDigits("472"), "Say start order")
+    assertContains(tools.verifyCheckDigits("472"), "Say start job")
     assertFalse(tools.isAwaitingCheckDigits())
     assertFalse(tools.isComplete())
 
     tools.startOrder("42")
-    assertContains(tools.confirmPick("951", 3), "Order 4 2 started")
-    assertFalse(tools.isAwaitingPickConfirmation())
+    assertContains(tools.confirmPick("951"), "Job 4 2 started")
+    assertEquals("AWAITING_ARRIVAL", tools.getModelCheckpoint().phase)
     assertFalse(tools.isComplete())
   }
 
@@ -77,10 +81,10 @@ class VoicePickingToolsTest {
   fun unknownOrder_keepsTheInitialCheckpointForTheRetry() {
     val tools = VoicePickingTools()
 
-    assertContains(tools.startOrder("24"), "Order 2 4 not found")
+    assertContains(tools.startOrder("24"), "Job 2 4 not found")
     assertTrue(tools.isAwaitingStartOrder())
     assertEquals("NOT_STARTED", tools.getModelCheckpoint().phase)
-    assertTrue(tools.getModelCheckpoint().lastValidInstruction.contains("Say start order"))
+    assertTrue(tools.getModelCheckpoint().lastValidInstruction.contains("Say start job"))
   }
 
   @Test
@@ -91,19 +95,19 @@ class VoicePickingToolsTest {
     tools.confirmArrival()
     tools.verifyCheckDigits("472")
     tools.confirmItemLocated()
-    assertContains(tools.confirmPick("951", 3), "aisle 7")
+    assertContains(tools.confirmPick("951"), "bay 7")
     assertFalse(tools.isComplete())
 
     tools.confirmArrival()
     tools.verifyCheckDigits("815")
     tools.confirmItemLocated()
-    assertContains(tools.confirmPick("208", 1), "aisle 3")
+    assertContains(tools.confirmPick("208"), "bay 3")
     assertFalse(tools.isComplete())
 
     tools.confirmArrival()
     tools.verifyCheckDigits("339")
     tools.confirmItemLocated()
-    assertContains(tools.confirmPick("664", 5), "Order 4 2 complete")
+    assertContains(tools.confirmPick("664"), "Job 4 2 complete")
     assertTrue(tools.isComplete())
   }
 
@@ -116,13 +120,16 @@ class VoicePickingToolsTest {
     val result = tools.cancelWarehouseItem("951")
 
     assertTrue(result.interruptedActivePick)
-    assertContains(requireNotNull(result.workerMessage), "You no longer need USB C cables")
-    assertContains(requireNotNull(result.workerMessage), "aisle 7, bay 1, shelf 4")
+    assertContains(requireNotNull(result.workerMessage), "power generator load is no longer required")
+    assertContains(requireNotNull(result.workerMessage), "bay 7, rack position 1, level 4")
     assertEquals("AWAITING_ARRIVAL", tools.getModelCheckpoint().phase)
-    assertContains(tools.getModelCheckpoint().lastValidInstruction, "Go to aisle 7, bay 1, shelf 4")
+    assertContains(
+      tools.getModelCheckpoint().lastValidInstruction,
+      "Proceed to bay 7, rack position 1, level 4",
+    )
     assertFalse(tools.getModelCheckpoint().lastValidInstruction.contains("Warehouse update"))
 
-    assertContains(tools.confirmArrival(), "Aisle 7, bay 1, shelf 4")
+    assertContains(tools.confirmArrival(), "Bay 7, rack position 1, level 4")
   }
 
   @Test
@@ -138,8 +145,8 @@ class VoicePickingToolsTest {
     tools.confirmArrival()
     tools.verifyCheckDigits("472")
     tools.confirmItemLocated()
-    assertContains(tools.confirmPick("951", 3), "aisle 3, bay 6, shelf 1")
-    assertContains(tools.confirmArrival(), "Aisle 3, bay 6, shelf 1")
+    assertContains(tools.confirmPick("951"), "bay 3, rack position 6, level 1")
+    assertContains(tools.confirmArrival(), "Bay 3, rack position 6, level 1")
   }
 
   @Test
@@ -148,8 +155,8 @@ class VoicePickingToolsTest {
 
     tools.syncCancelledWarehouseItems(setOf("951", "208"))
 
-    assertContains(tools.startOrder("42"), "aisle 3, bay 6, shelf 1")
-    assertContains(tools.confirmArrival(), "Aisle 3, bay 6, shelf 1")
+    assertContains(tools.startOrder("42"), "bay 3, rack position 6, level 1")
+    assertContains(tools.confirmArrival(), "Bay 3, rack position 6, level 1")
   }
 
   @Test
@@ -162,8 +169,8 @@ class VoicePickingToolsTest {
     val result = tools.cancelWarehouseItem("951")
 
     assertTrue(result.interruptedActivePick)
-    assertContains(requireNotNull(result.workerMessage), "Order 4 2 is complete")
-    assertContains(requireNotNull(result.workerMessage), "Deliver to packing station 4. Nice work.")
+    assertContains(requireNotNull(result.workerMessage), "Job 4 2 is complete")
+    assertContains(requireNotNull(result.workerMessage), "Nice work.")
     assertTrue(tools.isComplete())
   }
 
@@ -172,7 +179,7 @@ class VoicePickingToolsTest {
     tools.confirmArrival()
     tools.verifyCheckDigits("472")
     tools.confirmItemLocated()
-    tools.confirmPick("951", 3)
+    tools.confirmPick("951")
   }
 
   private fun assertContains(result: Map<String, Any>, expected: String) {

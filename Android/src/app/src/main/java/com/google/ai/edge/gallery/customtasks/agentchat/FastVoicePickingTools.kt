@@ -20,18 +20,18 @@ import com.google.ai.edge.litertlm.ToolParam
 import com.google.ai.edge.litertlm.ToolSet
 
 /**
- * Condensed voice-picking state machine used only by Fast mode.
+ * Condensed forklift pickup state machine used only by Fast mode.
  *
- * Unlike [VoicePickingTools], this flow has no arrival or item-location phases. A successful order
- * start immediately requests location check digits, and successful check digits immediately begin
- * pick confirmation.
+ * Unlike [VoicePickingTools], this flow has no separate safe-stop or load-secured gate. A
+ * successful job start immediately requests location check digits, and the operator reads the
+ * load-tag digits when the equipment is secure.
  */
 class FastVoicePickingTools : ToolSet {
 
   private enum class Phase {
     NOT_STARTED,
     AWAITING_CHECK_DIGITS,
-    AWAITING_PICK_CONFIRM,
+    AWAITING_TAG_CONFIRMATION,
     COMPLETE,
   }
 
@@ -86,43 +86,44 @@ class FastVoicePickingTools : ToolSet {
   @Synchronized
   @Tool(
     description =
-      "Start a fast warehouse picking session. Call when the worker says 'start order' followed " +
-        "by an order number. After the tool returns, reply with exactly its sayText, verbatim."
+      "Start a fast forklift pickup job. Call when the operator says 'start job' followed by a " +
+        "job number. After the tool returns, reply with exactly its sayText, verbatim."
   )
   fun startOrder(
-    @ToolParam(description = "The spoken order number, digits only.") orderNumber: String
+    @ToolParam(description = "The spoken job number, digits only.") orderNumber: String
   ): Map<String, Any> {
     toolCalledThisTurn = true
     if (phase != Phase.NOT_STARTED) {
-      lastToolTrace = VoicePickingToolTrace("start_order", "order ${orderNumber.digitsOnly()}", accepted = false)
+      lastToolTrace = VoicePickingToolTrace("start_order", "job ${orderNumber.digitsOnly()}", accepted = false)
       return say(lastValidInstruction)
     }
     val normalized = orderNumber.digitsOnly()
     val matched = MOCK_ORDERS.find { it.orderNumber == normalized }
     if (matched == null) {
-      lastToolTrace = VoicePickingToolTrace("start_order", "order $normalized", accepted = false)
-      return say("Order ${spellDigits(normalized.ifEmpty { orderNumber })} not found. $SIGN_ON_PROMPT")
+      lastToolTrace = VoicePickingToolTrace("start_order", "job $normalized", accepted = false)
+      return say("Job ${spellDigits(normalized.ifEmpty { orderNumber })} not found. $SIGN_ON_PROMPT")
     }
-    lastToolTrace = VoicePickingToolTrace("start_order", "order $normalized", accepted = true)
+    lastToolTrace = VoicePickingToolTrace("start_order", "job $normalized", accepted = true)
     order = matched
     pickIndex = 0
     advanceToNextPendingPick()
     val pick = currentPick
     if (pick == null) {
       phase = Phase.COMPLETE
-      return advance("Order ${spellDigits(matched.orderNumber)} has no remaining picks.")
+      return advance("Job ${spellDigits(matched.orderNumber)} has no remaining moves.")
     }
     phase = Phase.AWAITING_CHECK_DIGITS
     return advance(
-      "Order ${spellDigits(matched.orderNumber)} started, ${matched.picks.size} picks. " +
-        "Go to ${pick.locatorSpoken}. Read the 3 check digits on the location label."
+      "Job ${spellDigits(matched.orderNumber)} started, ${matched.picks.size} moves. " +
+        "Proceed to ${pick.locatorSpoken}. When safely stopped, read the 3 check digits on the " +
+        "location label."
     )
   }
 
   @Synchronized
   @Tool(
     description =
-      "Verify the worker is at the right location. Call when the worker says 3 location check " +
+      "Verify the operator is at the right pickup location. Call when the operator says 3 location check " +
         "digits. After the tool returns, reply with exactly its sayText, verbatim."
   )
   fun verifyCheckDigits(
@@ -155,31 +156,33 @@ class FastVoicePickingTools : ToolSet {
         expected = pick.checkDigits,
         accepted = true,
       )
-    phase = Phase.AWAITING_PICK_CONFIRM
-    val workerItemName = pick.itemName.replace("USB C", "USB-C")
-    return advance(
-      "Location confirmed. Pick ${pick.quantity} $workerItemName, item ending " +
-        "${spellDigits(pick.itemLast3)}."
+    phase = Phase.AWAITING_TAG_CONFIRMATION
+    return advanceWithModelCheckpoint(
+      text =
+        "Pickup location confirmed. Lift the ${pick.itemName} load, tag ending " +
+          "${spellDigits(pick.itemLast3)}. When the load is secure, read the last 3 digits on the " +
+          "load tag.",
+      modelCheckpoint = "When the load is secure, read the last 3 digits on the load tag.",
     )
   }
 
   @Synchronized
   @Tool(
     description =
-      "Confirm a completed fast pick. Call when the worker says 3 item digits plus the quantity " +
-        "picked. After the tool returns, reply with exactly its sayText, verbatim."
+      "Verify a secured fast-mode equipment load. In AWAITING_TAG_CONFIRMATION, call when the " +
+        "operator reads the last 3 load-tag digits. After the tool returns, reply with exactly " +
+        "its sayText, verbatim."
   )
   fun confirmPick(
-    @ToolParam(description = "The last 3 digits of the picked item, digits only.")
+    @ToolParam(description = "The last 3 spoken load-tag digits, digits only.")
     itemDigits: String,
-    @ToolParam(description = "How many units the worker picked.") quantity: Int,
   ): Map<String, Any> {
     toolCalledThisTurn = true
     val curOrder = order ?: return notInSession()
     val pick = currentPick ?: return notInSession()
-    if (phase != Phase.AWAITING_PICK_CONFIRM) {
+    if (phase != Phase.AWAITING_TAG_CONFIRMATION) {
       lastToolTrace =
-        VoicePickingToolTrace("confirm_pick", "${itemDigits.digitsOnly()}, quantity $quantity", accepted = false)
+        VoicePickingToolTrace("confirm_pick", itemDigits.digitsOnly(), accepted = false)
       return say(lastSayText)
     }
     val heardItemDigits = itemDigits.digitsOnly()
@@ -187,33 +190,17 @@ class FastVoicePickingTools : ToolSet {
       lastToolTrace =
         VoicePickingToolTrace(
           tool = "confirm_pick",
-          interpreted = "$heardItemDigits, quantity $quantity",
-          expected = "${pick.itemLast3}, quantity ${pick.quantity}",
+          interpreted = heardItemDigits,
+          expected = pick.itemLast3,
           accepted = false,
         )
-      return say(
-        "Wrong item. You need the item ending ${spellDigits(pick.itemLast3)}. Check the label and " +
-          "try again."
-      )
-    }
-    if (quantity != pick.quantity) {
-      lastToolTrace =
-        VoicePickingToolTrace(
-          tool = "confirm_pick",
-          interpreted = "$heardItemDigits, quantity $quantity",
-          expected = "${pick.itemLast3}, quantity ${pick.quantity}",
-          accepted = false,
-        )
-      return say(
-        "Quantity should be ${pick.quantity}, you said $quantity. Put the extra back or pick the " +
-          "rest, then say the item digits and quantity again."
-      )
+      return say("Wrong load tag. Read the last 3 digits on the load tag and try again.")
     }
     lastToolTrace =
       VoicePickingToolTrace(
         tool = "confirm_pick",
-        interpreted = "$heardItemDigits, quantity $quantity",
-        expected = "${pick.itemLast3}, quantity ${pick.quantity}",
+        interpreted = heardItemDigits,
+        expected = pick.itemLast3,
         accepted = true,
       )
     pickIndex++
@@ -221,15 +208,12 @@ class FastVoicePickingTools : ToolSet {
     val next = currentPick
     if (next == null) {
       phase = Phase.COMPLETE
-      return advance(
-        "Pick confirmed. Order ${spellDigits(curOrder.orderNumber)} complete. Deliver to packing " +
-          "station ${curOrder.packingStation}. Nice work."
-      )
+      return advance("Pickup confirmed. Job ${spellDigits(curOrder.orderNumber)} complete. Nice work.")
     }
     phase = Phase.AWAITING_CHECK_DIGITS
     return advance(
-      "Pick confirmed. Next, go to ${next.locatorSpoken}. " +
-        "Read the 3 check digits on the location label."
+      "Pickup confirmed. Next, proceed to ${next.locatorSpoken}. When safely stopped, read the 3 " +
+        "check digits on the location label."
     )
   }
 
@@ -243,7 +227,7 @@ class FastVoicePickingTools : ToolSet {
   fun isAwaitingCheckDigits(): Boolean = phase == Phase.AWAITING_CHECK_DIGITS
 
   @Synchronized
-  fun isAwaitingPickConfirmation(): Boolean = phase == Phase.AWAITING_PICK_CONFIRM
+  fun isAwaitingTagConfirmation(): Boolean = phase == Phase.AWAITING_TAG_CONFIRMATION
 
   @Synchronized
   fun getLastToolTrace(): VoicePickingToolTrace? = lastToolTrace
@@ -251,9 +235,6 @@ class FastVoicePickingTools : ToolSet {
   @Synchronized
   fun getModelCheckpoint(): VoicePickingModelCheckpoint =
     VoicePickingModelCheckpoint(phase = phase.name, lastValidInstruction = lastValidInstruction)
-
-  @Synchronized
-  fun getCurrentPickItemName(): String? = currentPick?.itemName
 
   @Synchronized
   fun syncCancelledWarehouseItems(itemLast3s: Set<String>) {
@@ -278,21 +259,20 @@ class FastVoicePickingTools : ToolSet {
     val next = currentPick
     if (next == null) {
       phase = Phase.COMPLETE
-      val cancelledItemName = cancelledPick.itemName.replace("USB C", "USB-C")
       val message =
-        "Warehouse update. You no longer need $cancelledItemName. " +
-          "Order ${spellDigits(curOrder.orderNumber)} is complete. Deliver to packing station " +
-          "${curOrder.packingStation}. Nice work."
+        "Warehouse update. The ${cancelledPick.itemName} load is no longer required. " +
+          "Job ${spellDigits(curOrder.orderNumber)} is complete. Nice work."
       advance(message)
       return WarehouseCancellationResult(interruptedActivePick = true, workerMessage = message)
     }
 
     phase = Phase.AWAITING_CHECK_DIGITS
     val nextInstruction =
-      "Go to ${next.locatorSpoken}. Read the 3 check digits on the location label."
-    val cancelledItemName = cancelledPick.itemName.replace("USB C", "USB-C")
+      "Proceed to ${next.locatorSpoken}. When safely stopped, read the 3 check digits on the " +
+        "location label."
     val message =
-      "Warehouse update. You no longer need $cancelledItemName. Next, $nextInstruction"
+      "Warehouse update. The ${cancelledPick.itemName} load is no longer required. " +
+        "Next, $nextInstruction"
     lastValidInstruction = nextInstruction
     say(message)
     return WarehouseCancellationResult(interruptedActivePick = true, workerMessage = message)
@@ -301,8 +281,8 @@ class FastVoicePickingTools : ToolSet {
   @Synchronized
   @Tool(
     description =
-      "Repeat the current instruction. Call when the worker says 'repeat' or 'say again', or when " +
-        "their utterance doesn't match another fast picking tool. After the tool returns, reply " +
+      "Repeat the current instruction. Call when the operator says 'repeat' or 'say again', or when " +
+        "their utterance doesn't match another fast forklift tool. After the tool returns, reply " +
         "with exactly its sayText, verbatim."
   )
   fun repeatInstruction(): Map<String, Any> {
@@ -313,6 +293,14 @@ class FastVoicePickingTools : ToolSet {
 
   private fun advance(text: String): Map<String, Any> {
     lastValidInstruction = text
+    return say(text)
+  }
+
+  private fun advanceWithModelCheckpoint(
+    text: String,
+    modelCheckpoint: String,
+  ): Map<String, Any> {
+    lastValidInstruction = modelCheckpoint
     return say(text)
   }
 
@@ -345,6 +333,6 @@ class FastVoicePickingTools : ToolSet {
   companion object {
     private const val KEY_SAY = "sayText"
     private const val SIGN_ON_PROMPT =
-      "Say start order, followed by the order number, to begin picking. For example: start order 4 2."
+      "Say start job, followed by the job number, to begin forklift pickup. For example: start job 4 2."
   }
 }

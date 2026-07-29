@@ -45,7 +45,7 @@ enum class VoicePickerMode {
   FAST,
 }
 
-/** Registers the dedicated Voice Picker page on the Gallery home screen. */
+/** Registers the dedicated Forklift Assistant page on the Gallery home screen. */
 class VoicePickerTask : CustomTask {
   val voicePickingTools = VoicePickingTools()
   val fastVoicePickingTools = FastVoicePickingTools()
@@ -114,16 +114,10 @@ class VoicePickerTask : CustomTask {
       VoicePickerMode.FAST -> fastVoicePickingTools.isAwaitingCheckDigits()
     }
 
-  fun isAwaitingPickConfirmation(mode: VoicePickerMode): Boolean =
+  fun isAwaitingTagConfirmation(mode: VoicePickerMode): Boolean =
     when (mode) {
-      VoicePickerMode.REGULAR -> voicePickingTools.isAwaitingPickConfirmation()
-      VoicePickerMode.FAST -> fastVoicePickingTools.isAwaitingPickConfirmation()
-    }
-
-  fun getCurrentPickItemName(mode: VoicePickerMode): String? =
-    when (mode) {
-      VoicePickerMode.REGULAR -> voicePickingTools.getCurrentPickItemName()
-      VoicePickerMode.FAST -> fastVoicePickingTools.getCurrentPickItemName()
+      VoicePickerMode.REGULAR -> voicePickingTools.isAwaitingTagConfirmation()
+      VoicePickerMode.FAST -> fastVoicePickingTools.isAwaitingTagConfirmation()
     }
 
   fun beginFastModelTurn(onSayText: ((String) -> Unit)? = null) =
@@ -147,11 +141,11 @@ class VoicePickerTask : CustomTask {
   override val task =
     Task(
       id = VOICE_PICKER_TASK_ID,
-      label = "Voice Picker",
+      label = "Forklift Assistant",
       category = Category.LLM,
       icon = Icons.Outlined.Mic,
-      description = "A hands-free warehouse voice-picking experience.",
-      shortDescription = "Pick warehouse orders by voice",
+      description = "A hands-free forklift pickup assistant for warehouse equipment.",
+      shortDescription = "Move equipment by voice",
       models = mutableListOf(),
       experimental = true,
     )
@@ -192,34 +186,35 @@ const val VOICE_PICKER_TASK_ID = "voice_picker"
 
 private const val VOICE_PICKER_SYSTEM_PROMPT =
   """
-  You are a warehouse voice-picking assistant. Route every worker utterance to exactly one
-  voice-picking tool. Arrival phrases such as "I'm here" call confirm_arrival; item-location
-  phrases such as "I found it" call confirm_item_located. Three digits alone verify a location,
-  and item digits plus a quantity confirm a pick. After a tool returns, reply with exactly its
-  sayText value and nothing else.
+  You are a warehouse forklift pickup assistant. Route every operator utterance to exactly one
+  forklift tool. Start-job phrases call start_order. Safe-stop phrases such as "I'm stopped" or
+  "I'm in position" call confirm_arrival. Load-secured phrases such as "load secure" or "I have
+  it" call confirm_item_located. In AWAITING_CHECK_DIGITS, three digits call
+  verify_check_digits. In AWAITING_TAG_CONFIRMATION, three digits call confirm_pick. After a tool
+  returns, reply with exactly its sayText value and nothing else.
   Treat the routing context included with each new audio clip as authoritative. Extract numeric
   values only from that new audio clip; never substitute values from a previous instruction,
   correction, or conversation turn.
-  Never invent warehouse data, items, quantities, or locations.
+  Never invent warehouse data, equipment, load tags, or locations.
   """
 
 private const val FAST_VOICE_PICKER_SYSTEM_PROMPT =
   """
-  You are a tool-call router for a condensed warehouse voice-picking workflow. You are not a
+  You are a tool-call router for a condensed warehouse forklift pickup workflow. You are not a
   conversational assistant or a transcription service. Never repeat, quote, paraphrase,
-  acknowledge, or transcribe the worker's audio. Your first and only action for every worker
+  acknowledge, or transcribe the operator's audio. Your first and only action for every operator
   utterance must be exactly one tool call. Never output plain text before calling a tool.
-  Start-order phrases call start_order. In the
+  Start-job phrases call start_order. In the
   AWAITING_CHECK_DIGITS state, three digits call verify_check_digits. In the
-  AWAITING_PICK_CONFIRM state, item digits plus a quantity call confirm_pick. Repeat requests call
+  AWAITING_TAG_CONFIRMATION state, three digits call confirm_pick. Repeat requests call
   repeat_instruction. If the audio is unclear or does not match the expected response for the
   current state, call repeat_instruction instead of guessing or producing text.
   End the turn after making the tool call. Do not generate a natural-language response; Android
   speaks the deterministic tool result directly. Treat the routing context included with each new
   audio clip as authoritative. Extract numeric values only from that new audio clip; never
   substitute values from an instruction, correction, or previous turn. Never independently decide
-  whether an answer is correct. Kotlin performs all validation. Never invent warehouse data, items,
-  quantities, or locations.
+  whether an answer is correct. Kotlin performs all validation. Never invent warehouse data,
+  equipment, load tags, or locations.
   """
 
 @Module
