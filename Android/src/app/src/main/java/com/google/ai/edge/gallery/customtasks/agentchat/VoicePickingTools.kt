@@ -116,6 +116,13 @@ class VoicePickingTools : ToolSet {
     cancelledItemLast3.clear()
   }
 
+  /**
+   * Starts the pickup job matching the spoken [orderNumber] (non-digits stripped).
+   *
+   * Unknown job numbers are rejected without changing state. On success the job's first pending
+   * pick becomes active and the phase moves to [Phase.AWAITING_ARRIVAL], or straight to
+   * [Phase.COMPLETE] when every move was already cancelled.
+   */
   @Synchronized
   @Tool(
     description =
@@ -147,6 +154,13 @@ class VoicePickingTools : ToolSet {
     )
   }
 
+  /**
+   * Marks the operator as safely stopped at the current bay and moves [Phase.AWAITING_ARRIVAL]
+   * to [Phase.AWAITING_CHECK_DIGITS], prompting for the location label's check digits.
+   *
+   * Takes no parameters: arriving carries no value to extract, so any utterance in this phase
+   * counts. Out-of-phase calls re-speak the current prompt without advancing.
+   */
   @Synchronized
   @Tool(description = "Confirm the operator is safely stopped at the current bay. Reply with sayText.")
   fun confirmArrival(): Map<String, Any> {
@@ -158,6 +172,12 @@ class VoicePickingTools : ToolSet {
     )
   }
 
+  /**
+   * Compares the spoken [checkDigits] (non-digits stripped) against the active pick's check
+   * digits. A match moves [Phase.AWAITING_CHECK_DIGITS] to [Phase.AWAITING_LOAD_SECURED] and
+   * instructs the lift; a mismatch keeps the phase and speaks a correction. Every attempt is
+   * recorded in [lastToolTrace] for the debug UI.
+   */
   @Synchronized
   @Tool(
     description =
@@ -200,6 +220,11 @@ class VoicePickingTools : ToolSet {
     )
   }
 
+  /**
+   * Confirms the equipment load is secured and moves [Phase.AWAITING_LOAD_SECURED] to
+   * [Phase.AWAITING_TAG_CONFIRMATION]. Parameterless like [confirmArrival]; out-of-phase calls
+   * re-speak the current prompt without advancing.
+   */
   @Synchronized
   @Tool(description = "Confirm the requested equipment load is secure. Reply with sayText.")
   fun confirmItemLocated(): Map<String, Any> {
@@ -209,6 +234,13 @@ class VoicePickingTools : ToolSet {
     return advance("Read the last 3 digits on the load tag to confirm.")
   }
 
+  /**
+   * Verifies the spoken last-3 load-tag digits ([itemDigits], non-digits stripped) against the
+   * active pick. On a match the pick completes and the workflow returns to
+   * [Phase.AWAITING_ARRIVAL] for the next pending pick, or ends at [Phase.COMPLETE] after the
+   * last one; a mismatch keeps the phase and speaks a correction. Every attempt is recorded in
+   * [lastToolTrace].
+   */
   @Synchronized
   @Tool(
     description =
@@ -258,9 +290,11 @@ class VoicePickingTools : ToolSet {
     )
   }
 
+  /** True once every pick in the job is done or cancelled. */
   @Synchronized
   fun isComplete(): Boolean = phase == Phase.COMPLETE
 
+  /** True before any job has been started. */
   @Synchronized
   fun isAwaitingStartOrder(): Boolean = phase == Phase.NOT_STARTED
 
@@ -272,9 +306,11 @@ class VoicePickingTools : ToolSet {
   @Synchronized
   fun isAwaitingTagConfirmation(): Boolean = phase == Phase.AWAITING_TAG_CONFIRMATION
 
+  /** The most recent tool attempt shown in the debug UI, or null before the first call. */
   @Synchronized
   fun getLastToolTrace(): VoicePickingToolTrace? = lastToolTrace
 
+  /** Snapshot of the phase and last valid instruction used to rebuild Gemma's context each turn. */
   @Synchronized
   fun getModelCheckpoint(): VoicePickingModelCheckpoint =
     VoicePickingModelCheckpoint(phase = phase.name, lastValidInstruction = lastValidInstruction)
@@ -329,6 +365,10 @@ class VoicePickingTools : ToolSet {
     return WarehouseCancellationResult(interruptedActivePick = true, workerMessage = message)
   }
 
+  /**
+   * Re-speaks [lastValidInstruction] without changing state — the safe fallback for "repeat"
+   * requests and for utterances Gemma cannot route to any other tool.
+   */
   @Synchronized
   @Tool(
     description =
@@ -341,11 +381,13 @@ class VoicePickingTools : ToolSet {
     return say(lastValidInstruction)
   }
 
+  /** Publishes [text] as the new checkpoint instruction ([lastValidInstruction]) and speaks it. */
   private fun advance(text: String): Map<String, Any> {
     lastValidInstruction = text
     return say(text)
   }
 
+  /** Moves [pickIndex] past any picks the warehouse has cancelled since the job started. */
   private fun advanceToNextPendingPick() {
     val picks = order?.picks ?: return
     while (pickIndex < picks.size && picks[pickIndex].itemLast3 in cancelledItemLast3) {
@@ -353,6 +395,10 @@ class VoicePickingTools : ToolSet {
     }
   }
 
+  /**
+   * Builds the tool result that makes the model speak [text] verbatim. Unlike [advance] this does
+   * not touch the checkpoint, so guard and error replies never leak into the next model turn.
+   */
   private fun say(text: String): Map<String, Any> {
     lastSayText = text
     return mapOf(
@@ -364,6 +410,7 @@ class VoicePickingTools : ToolSet {
     )
   }
 
+  /** Guard reply when no job is active: re-speaks the sign-on prompt. */
   private fun notInSession(): Map<String, Any> = say(SIGN_ON_PROMPT)
 
   companion object {
